@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-sessiongraph-native",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Native Rust index kernel for DeepSeek Harness sessiongraph — scan, multi-frame zstd decode, JSONL parse and SQLite write, exposed to Node through napi-rs",
   "keywords": [
     "dsh",

@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-sessiongraph-bundle",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Bundle for dsh-plugin-sessiongraph — mounts the local conversation-index capability as one DSH profile layer",
   "keywords": [
     "dsh",
@@ -34,5 +34,8 @@
     "dsh-plugin-sessiongraph-sessions": "workspace:^",
     "dsh-plugin-sessiongraph-sqlite": "workspace:^",
     "dsh-plugin-sessiongraph-tool": "workspace:^"
+  },
+  "scripts": {
+    "prepack": "node -e \"require('node:fs').copyFileSync('../../README.md','README.md')\""
   }
 }
