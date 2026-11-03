@@ -443,11 +443,41 @@ async function runQuery(
   const request = buildRequest(args, indexRoot, config.maxLimit)
   const refresh = await refresher.ensureFresh(exec.signal)
   try {
-    const result = await ctx.sessiongraph.query(request, exec.signal)
-    return projectResult(result, refresh.stale)
+    return projectResult(await ctx.sessiongraph.query(request, exec.signal), refresh.stale)
   } catch (error) {
-    throw explainQueryFailure(error, indexRoot)
+    // A damaged index is recoverable without asking anyone: the source logs still exist, only the
+    // derived database is unusable. Rebuilding once and retrying is strictly better than surfacing
+    // `database disk image is malformed` to the model, and it is exactly what a person would do by
+    // hand. Every other failure keeps its existing explanation.
+    if (!isCorruptIndexError(error)) throw explainQueryFailure(error, indexRoot)
+    try {
+      console.error(`sessiongraph: index at "${indexRoot}" is unreadable (${describeError(error)}); rebuilding it`)
+      await ctx.sessiongraph.index(indexRoot, { force: true })
+      return projectResult(await ctx.sessiongraph.query(request, exec.signal), refresh.stale)
+    } catch (rebuildError) {
+      console.error(`sessiongraph: rebuilding the index failed: ${describeError(rebuildError)}`)
+      throw explainQueryFailure(error, indexRoot)
+    }
   }
+}
+
+/**
+ * Whether a failure means the index file itself is unusable.
+ * @param error - the error a query raised.
+ * @returns true for the seam's corruption code and for SQLite's own corruption messages.
+ */
+function isCorruptIndexError(error: unknown): boolean {
+  if (error instanceof SessiongraphError) return error.code === 'SESSIONGRAPH_CORRUPT'
+  return /malformed|not a database|file is encrypted/i.test(describeError(error))
+}
+
+/**
+ * One-line description of a thrown value.
+ * @param error - whatever was caught.
+ * @returns its message, or a stringified form for non-errors.
+ */
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 /**

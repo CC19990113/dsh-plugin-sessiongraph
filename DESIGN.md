@@ -210,3 +210,28 @@ DSH 内核已经有一整套会话查询设施，能用的直接用：
 - **补充路径**：每轮问 `sessionQuery.listSessions()`，挑 `live === true` 的（通常 1–3 个），`readSession()` 拿事件后重建。上限 `maxLiveSessions`（默认 8）
 - live 会话每轮都重建（它们还在变，没有稳定 mtime 可依赖）
 - live 路径放在主写事务**之外**，`readSession` 回放慢也不拖长主索引
+
+## 13. 写并发与索引损坏的防护
+
+同一份 `index.db` 有两个写者（TypeScript 经 `node:sqlite`、Rust 经 bundled rusqlite），三个触发入口（`agent/created` 后台任务、查询前惰性刷新、显式 `sessiongraph_index`）。SQLite 不会替两个各自打开文件的写者排队，后果不是干净的锁冲突，而是事后某次查询报 `database disk image is malformed`，只能整体重建。
+
+### 写侧：一把跨进程的文件锁
+
+`packages/sessions/src/lock.ts`：
+
+- 用 `open(path, 'wx')` 独占创建 `<indexRoot>/index.lock`，写入 pid；输者每 100ms 轮询
+- 崩溃会留下文件，所以锁的 mtime 超过 `indexLockStaleMs`（默认 5 分钟）视为持有者已死，直接打破
+- 等待上限 `LOCK_TIMEOUT_MS`（2 分钟），超时抛错让调用方跳过本轮，而不是并发写
+- `runIndex` 整体在锁内（含 live pass），两个引擎路径都覆盖
+
+> 锁文件不能等到过期才清理：释放用同步 `rmSync`，因为异步释放可能被正在展开的 `finally` 丢掉，泄漏的锁会阻塞后面所有写者。
+
+### 读侧：损坏即自愈
+
+`packages/tool/src/index.ts` 的查询路径捕获两类失败——seam 的 `SESSIONGRAPH_CORRUPT`，以及 SQLite 自己抛出的 `malformed` / `not a database` / `file is encrypted`——然后：
+
+1. `ctx.sessiongraph.index(indexRoot, { force: true })` 重建一次
+2. 用原来的请求重试一次
+3. 重建或重试仍失败才把原始错误抛给模型
+
+索引是派生数据，源日志没动过，所以重建永远安全；这也是人看到那个错误后会做的事，只是不需要人来点。

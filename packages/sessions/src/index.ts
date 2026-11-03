@@ -48,6 +48,7 @@ import type {
   SessiongraphIndexOptions,
   SessiongraphIndexReport,
 } from 'dsh-plugin-sessiongraph-service'
+import { acquireIndexLock } from './lock.ts'
 import { collectLiveSessions, LIVE_SOURCE_PREFIX } from './live.ts'
 import type { SessionQueryService } from './live.ts'
 import { parseSessionLog } from './parse.ts'
@@ -146,6 +147,12 @@ export interface Config {
    */
   autoBuild?: boolean
   /**
+   * Treat a write lock older than this many milliseconds as abandoned (default 300000). A crashed
+   * run leaves `index.lock` behind; without a staleness window the index would stay unwritable until
+   * someone deleted the file by hand.
+   */
+  indexLockStaleMs?: number
+  /**
    * Hand an explicit index run to the host's background-job registry once the session store holds at
    * least this many logs (default 1000). Below it the run is synchronous, because a small index is
    * faster than the round-trip through `job_output`.
@@ -172,6 +179,7 @@ export const Config: z<Config> = z.object({
   maxFileBytes: z.number().default(DEFAULT_MAX_FILE_BYTES),
   autoIndex: z.boolean().default(true),
   autoBuild: z.boolean().default(true),
+  indexLockStaleMs: z.number().default(300_000),
   backgroundIndexThreshold: z.number().default(DEFAULT_BACKGROUND_INDEX_THRESHOLD),
   maxLiveSessions: z.number().default(DEFAULT_MAX_LIVE_SESSIONS),
   engine: z.union([z.const('auto'), z.const('native'), z.const('typescript')]).default(DEFAULT_ENGINE),
@@ -772,6 +780,33 @@ async function runLivePass(
  * @returns what the run did.
  */
 export async function runIndex(
+  indexRoot: string,
+  options: SessiongraphIndexOptions,
+  signal: AbortSignal | undefined,
+  config: ResolvedConfig,
+  ctx?: Context,
+): Promise<SessiongraphIndexReport> {
+  // Serialize every writer of this root — the automatic refresh, the lazy refresh and an explicit
+  // `/sessiongraph index` all land here, and two engines opening the same SQLite file is how the
+  // index got corrupted before. Waiting for another run to finish is always better than rebuilding.
+  const release = await acquireIndexLock(indexRoot, { staleMs: config.indexLockStaleMs })
+  try {
+    return await runIndexUnlocked(indexRoot, options, signal, config, ctx)
+  } finally {
+    release()
+  }
+}
+
+/**
+ * The actual run, with the write lock already held.
+ * @param indexRoot - directory holding the index.
+ * @param options - caller switches.
+ * @param signal - aborts the run.
+ * @param config - resolved plugin configuration.
+ * @param ctx - plugin context, consulted for the optional live-session service.
+ * @returns the run's report.
+ */
+async function runIndexUnlocked(
   indexRoot: string,
   options: SessiongraphIndexOptions,
   signal: AbortSignal | undefined,
