@@ -53,7 +53,7 @@ afterEach(() => {
 /** Write the sidecar prompt assembly and the refresh decision both read. */
 function writeStatus(ageMs: number): void {
   writeFileSync(join(root, 'status.json'), JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
     indexedAt: Date.now() - ageMs,
     sessions: 1,
     entries: 1,

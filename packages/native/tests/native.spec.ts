@@ -161,7 +161,7 @@ describe('native index kernel', () => {
 
     const database = openIndex()
     try {
-      expect(database.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version')).toEqual({ value: '1' })
+      expect(database.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version')).toEqual({ value: '2' })
       expect(database.prepare('SELECT value FROM meta WHERE key = ?').get('discovered')).toEqual({ value: '3' })
       expect(database.prepare('SELECT value FROM meta WHERE key = ?').get('failed')).toEqual({ value: '0' })
       expect(database.prepare('SELECT value FROM meta WHERE key = ?').get('indexed_at')).toBeTruthy()
@@ -193,18 +193,24 @@ describe('native index kernel', () => {
       const latin = database.prepare('SELECT rowid FROM entry_fts WHERE entry_fts MATCH ?').all('"codegraph"')
       expect(latin).toHaveLength(1)
 
-      // Token streams must be identical to the seam tokenizer's, or the TS store cannot answer.
-      const rows = database
-        .prepare('SELECT e.text AS text, f.tokens AS tokens FROM entry e JOIN entry_fts f ON f.rowid = e.id')
-        .all() as { text: string; tokens: string }[]
+      // The FTS table is contentless, so the token stream cannot be read back. The parity property
+      // that matters is the other direction: every token the seam tokenizer derives from an entry's
+      // text must resolve to that entry through the inverted index.
+      const rows = database.prepare('SELECT id, text FROM entry').all() as { id: number; text: string }[]
       expect(rows.length).toBe(6)
-      for (const row of rows) expect(row.tokens).toBe(tokenize(row.text).join(' '))
+      for (const row of rows) {
+        const expression = [...new Set(tokenize(row.text))].map(token => `"${token}"`).join(' AND ')
+        const hit = database
+          .prepare('SELECT rowid FROM entry_fts WHERE entry_fts MATCH ?')
+          .all(expression) as { rowid: number }[]
+        expect(hit.map(entry => entry.rowid)).toContain(row.id)
+      }
     } finally {
       database.close()
     }
 
     const status = JSON.parse(readFileSync(join(indexRoot, 'status.json'), 'utf8')) as Record<string, unknown>
-    expect(status).toMatchObject({ schemaVersion: 1, sessions: 3, entries: 6, workspaces: 2, bytes: report.bytes })
+    expect(status).toMatchObject({ schemaVersion: 2, sessions: 3, entries: 6, workspaces: 2, bytes: report.bytes })
     expect(status.indexedAt).toBeGreaterThan(0)
 
     expect(existsSync(`${indexPath}.tmp`)).toBe(false)

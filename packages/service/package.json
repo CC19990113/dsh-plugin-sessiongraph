@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-sessiongraph-service",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Service definition for the DeepSeek Harness session-graph seam (ctx.sessiongraph) — a store-provider and indexer-provider registry over local conversation history, plus the normalized query vocabulary the model-facing tool speaks",
   "keywords": [
     "dsh",

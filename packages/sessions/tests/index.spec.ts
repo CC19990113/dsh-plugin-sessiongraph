@@ -186,15 +186,17 @@ describe('runIndex', () => {
     const hits = query(`SELECT rowid FROM entry_fts WHERE entry_fts MATCH ?`, '"广告"')
     expect(hits.length).toBeGreaterThan(0)
 
-    const tokens = query(
-      'SELECT tokens FROM entry_fts WHERE rowid = (SELECT id FROM entry WHERE session_id = ? AND kind = ?)',
-      'session-aaaa',
-      'user',
+    // The index is contentless, so the token stream itself cannot be read back. Assert the same
+    // property through the inverted index instead: the overlapping bigrams of `我今天在改广告` plus
+    // the lowercased `sdk` all have to line up on exactly one row.
+    const composed = query(
+      'SELECT rowid FROM entry_fts WHERE entry_fts MATCH ?',
+      '"我今" AND "今天" AND "天在" AND "在改" AND "改广" AND "广告" AND "sdk"',
     )
-    expect(tokens[0]?.tokens).toBe('我今 今天 天在 在改 改广 广告 sdk')
+    expect(composed).toHaveLength(1)
 
     expect(readStatus()).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       indexedAt: expect.any(Number),
       sessions: report.sessions,
       entries: report.entries,
@@ -204,7 +206,7 @@ describe('runIndex', () => {
 
     const meta = query('SELECT key, value FROM meta ORDER BY key')
     expect(Object.fromEntries(meta.map(row => [row.key, row.value]))).toMatchObject({
-      schema_version: '1',
+      schema_version: '2',
       discovered: '2',
       failed: '0',
     })

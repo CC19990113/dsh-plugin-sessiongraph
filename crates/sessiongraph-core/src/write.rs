@@ -30,7 +30,7 @@ use crate::parse::ParsedSession;
 use crate::tokenize;
 
 /// Current on-disk schema version, matching `SCHEMA_VERSION` in the seam package.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Relative path of the index file inside an index root.
 pub const INDEX_RELATIVE_PATH: &str = "index.db";
@@ -96,6 +96,8 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_session_workspace ON session (workspace, last_at DESC)",
     "CREATE VIRTUAL TABLE IF NOT EXISTS entry_fts USING fts5(
      tokens,
+     content = '',
+     contentless_delete = 1,
      tokenize = 'unicode61 remove_diacritics 0'
    )",
 ];

@@ -9,8 +9,14 @@
  * @module dsh-plugin-sessiongraph-service/schema
  */
 
-/** Current on-disk schema version. Bump on any change to {@link SCHEMA_STATEMENTS}. */
-export const SCHEMA_VERSION = 1
+/**
+ * Current on-disk schema version. Bump on any change to {@link SCHEMA_STATEMENTS}.
+ *
+ * v2 stores the FTS index contentless (`content=''`): FTS5's default build keeps a copy of every
+ * indexed column in a `_content` shadow table, which on a real corpus was 67MB of a 174MB file
+ * holding a token stream that can always be recomputed from `entry.text`.
+ */
+export const SCHEMA_VERSION = 2
 
 /** Relative path of the index file inside an index root. */
 export const INDEX_RELATIVE_PATH = 'index.db'
@@ -27,9 +33,14 @@ export const ENTRY_FTS_TABLE = 'entry_fts'
 /**
  * Every statement needed to create an index from nothing, in dependency order.
  *
- * `entry_fts` is an external-content-free FTS5 table: it stores only the bigram token stream and
- * keys rows by `entry.id`, so the entry text is never duplicated into the index. `content=''` would
- * also work, but the plain form keeps `delete`/`insert` symmetrical with one rowid.
+ * `entry_fts` is a **contentless** FTS5 table (`content=''`): it stores only the inverted index for
+ * the bigram token stream, keyed by `entry.id`. The default build keeps a `_content` shadow table
+ * holding a second copy of that stream — 67MB of a 174MB file on a real corpus, for data that can
+ * always be recomputed from `entry.text`.
+ *
+ * `contentless_delete=1` (SQLite 3.43+) is what makes that affordable: without it a contentless
+ * table cannot be maintained with plain `DELETE FROM`, and every removed session would need the old
+ * token values fed back through FTS5's `delete` command.
  */
 export const SCHEMA_STATEMENTS: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS meta (
@@ -66,6 +77,8 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
   `CREATE INDEX IF NOT EXISTS idx_session_workspace ON ${SESSION_TABLE} (workspace, last_at DESC)`,
   `CREATE VIRTUAL TABLE IF NOT EXISTS ${ENTRY_FTS_TABLE} USING fts5(
      tokens,
+     content = '',
+     contentless_delete = 1,
      tokenize = 'unicode61 remove_diacritics 0'
    )`,
 ]

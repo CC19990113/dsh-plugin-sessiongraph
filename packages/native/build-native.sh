@@ -72,4 +72,13 @@ fi
 
 destination="$here/sessiongraph-core.$platform-$arch.node"
 cp "$source_file" "$destination"
+
+# arm64 macOS kills an unsigned Mach-O outright (SIGKILL at dlopen, not an error the loader
+# reports), and copying a linker-signed binary to a new path does not preserve that signature.
+# Re-sign adhoc after every copy so a freshly built kernel actually loads.
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --sign - "$destination" >/dev/null 2>&1 || \
+    echo "build-native: warning: adhoc signing failed; the .node may be killed on load" >&2
+fi
+
 echo "build-native: wrote $destination ($(wc -c < "$destination" | tr -d ' ') bytes)"

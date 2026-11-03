@@ -41,7 +41,7 @@ function writeIndexFile(): void {
 /** Write the sidecar with an age relative to now. */
 function writeStatus(ageMs: number): void {
   writeFileSync(join(root, 'status.json'), JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
     indexedAt: Date.now() - ageMs,
     sessions: 1,
     entries: 1,
