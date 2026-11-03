@@ -113,6 +113,14 @@ export interface CommandRegistry {
 
 /** What the command needs from the plugin configuration. */
 export interface CommandOptions {
+  /**
+   * Feed the command's result back into the session as a plugin message (default false).
+   *
+   * Off by default after `/sessiongraph status` was observed to hang the desktop shell: the command
+   * plane runs on the host's main thread, and calling `agent.inject` from inside a handler drags the
+   * agent loop (prompt assembly, and with it every synchronous status read) onto that same stack.
+   */
+  injectResults?: boolean
   /** Absolute directory holding the index. */
   readonly indexRoot: string
   /** Longest snippet the `search` subcommand prints per hit. */
@@ -203,7 +211,9 @@ export async function runCommand(
     const result = await dispatch(ctx, options, plan, invocation)
     // Only a successful lookup is worth telling the model about: a typo or a failed call is the
     // human's problem, and injecting it would spend context on something the model cannot use.
-    if (result.kind === 'success') injectCommandNotice(invocation, plan, result.text ?? '')
+    if (result.kind === 'success') {
+      injectCommandNotice(invocation, plan, result.text ?? '', options.injectResults === true)
+    }
     return result
   } catch (error) {
     return { kind: 'error', text: describe(error) }
@@ -255,7 +265,13 @@ export const INJECTED_NOTICE_PLUGIN = 'dsh-plugin-sessiongraph'
  * @param plan - the parsed subcommand that ran.
  * @param text - the result text the person saw.
  */
-function injectCommandNotice(invocation: CommandInvocation, plan: CommandPlan, text: string): void {
+function injectCommandNotice(
+  invocation: CommandInvocation,
+  plan: CommandPlan,
+  text: string,
+  enabled: boolean,
+): void {
+  if (!enabled) return
   const agent = invocation.agent
   if (agent?.inject === undefined) return
   try {

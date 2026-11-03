@@ -84,7 +84,7 @@ function harness(service: {
       },
     },
   }
-  registerCommands(ctx as unknown as Context, { indexRoot: INDEX_ROOT, maxSnippetChars: 600 })
+  registerCommands(ctx as unknown as Context, { indexRoot: INDEX_ROOT, maxSnippetChars: 600, injectResults: true })
   const definition = definitions[0]
   if (definition === undefined) throw new Error('the command was not registered')
   const injected: UserMessage[] = []
@@ -397,6 +397,33 @@ describe('runCommand', () => {
 })
 
 describe('model-facing injection', () => {
+  it('stays off unless the option is set, because the host main thread runs the handler', async () => {
+    const definitions: CommandDefinition[] = []
+    const injected: UserMessage[] = []
+    const ctx = {
+      inject: (_deps: string[], callback: (child: unknown) => void) => callback({
+        commands: { register: (definition: CommandDefinition) => definitions.push(definition) },
+        effect: (install: () => unknown) => install(),
+      }),
+      sessiongraph: {
+        async query() {
+          return { operation: 'status', indexed: true, indexPath: '/tmp/x', sessions: 1, entries: 1, workspaces: 1, liveSessions: 0, indexedAt: 1, bytes: 1 }
+        },
+        async index() { throw new Error('unexpected') },
+      },
+    }
+    registerCommands(ctx as unknown as Context, { indexRoot: INDEX_ROOT, maxSnippetChars: 600 })
+    const definition = definitions[0]
+    if (definition === undefined) throw new Error('the command was not registered')
+    const result = await definition.handler({
+      rawInput: '',
+      agent: { id: 'session-1', session: { header: { cwd: '/tmp' } }, inject: (message: UserMessage) => injected.push(message) },
+      signal: new AbortController().signal,
+    } as unknown as CommandInvocation)
+    expect(result.kind).toBe('success')
+    expect(injected).toHaveLength(0)
+  })
+
   it('tells the model what a successful search found', async () => {
     const subject = harness({ query: async () => search(2) })
     const result = await subject.invoke('search 广告')

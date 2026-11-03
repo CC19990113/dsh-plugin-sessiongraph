@@ -175,6 +175,13 @@ export interface Config {
    * disables the lazy refresh entirely: queries then trust the indexer's own schedule.
    */
   freshnessThresholdMs?: number
+  /**
+   * Feed `/sessiongraph` command results back into the session as a plugin message (default false).
+   * Off by default: calling `agent.inject` from inside a command handler drags the agent loop onto
+   * the host's main thread, and `/sessiongraph status` was observed to hang the desktop shell that
+   * way. Set true only if you want the model to see what you just searched.
+   */
+  injectCommandResults?: boolean
   /** Tool-call timeout budget in ms for the query-side `sessiongraph` tool (default 30000). */
   timeoutMs?: number
   /** Tool-call timeout budget in ms for the `sessiongraph_index` tool (default 300000). */
@@ -186,6 +193,7 @@ export const Config: z<Config> = z.object({
   maxLimit: z.number().default(DEFAULT_MAX_LIMIT),
   maxSnippetChars: z.number().default(DEFAULT_MAX_SNIPPET_CHARS),
   freshnessThresholdMs: z.number().default(DEFAULT_FRESHNESS_THRESHOLD_MS),
+  injectCommandResults: z.boolean().default(false),
   timeoutMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_SESSIONGRAPH_TOOL_TIMEOUT_MS),
   indexTimeoutMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_SESSIONGRAPH_INDEX_TIMEOUT_MS),
 })
@@ -280,6 +288,7 @@ export function apply(ctx: Context, config: Config): void {
   registerCommands(ctx, {
     indexRoot,
     maxSnippetChars: resolved.maxSnippetChars,
+    injectResults: resolved.injectCommandResults,
   })
 }
 
