@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-sessiongraph-tool",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "Model-facing sessiongraph tools for DeepSeek Harness — a read-only sessiongraph tool that searches the whole local conversation history, plus a sessiongraph_index tool that builds or refreshes the index on its own, much larger timeout budget",
   "keywords": [
     "dsh",

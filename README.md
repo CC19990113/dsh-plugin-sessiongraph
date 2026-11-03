@@ -103,6 +103,10 @@ Memory does not overlap with either: a conversation may **never enter memory** (
 
 Prefer to drive it yourself? `autoBuild: false` disables the first automatic build and `autoIndex: false` disables the incremental refreshes; everything then goes through `sessiongraph_index` / `/sessiongraph index`.
 
+### When the registry has a newer release
+
+**It says so once, after a tool runs.** A plugin cannot upgrade itself — it lives in a profile's dependency tree, and rewriting that tree is the host's job. So it does the next best thing: after one of its tools runs, it checks the registry in the background and, when the published version is newer than the running one, appends a notice to the next step of the conversation, where both the model and the user can see it. Three details keep it from turning into noise: the check only ever happens *after* a tool was used; a release is announced once, with `notifiedVersion` persisted so a desktop restart does not replay it; and checks run at most every six hours, while an unreachable registry, a timeout, or an unwritable state file all mean "nothing to report" rather than an error. The registry follows npm's own resolution order — `npm_config_registry`, then `registry=` in the user's `~/.npmrc`, then npm's public default — so a machine behind a mirror checks the mirror it actually installs from. `updateCheck: false` turns the whole thing off, and `updateCheckIntervalMs` changes the interval.
+
 ### What gets indexed
 
 `user/message` (only `source.kind === 'user'`, i.e. text a human typed), the `text` blocks of `assistant/message` (`reasoning` is 61% of the bytes and is not indexed), `tool/call` names and arguments, and `session/title`. Skipped: `tool/result` bodies, `request/header`, `step/*`, `job/*`.

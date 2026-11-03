@@ -116,3 +116,18 @@ export function indexStatusHint(indexRoot: string): string {
   return `索引文件已存在（${indexPath}，${formatBytes(index.size)}，${formatTime(index.mtimeMs)} 更新），`
     + '但没有 status 记录——规模与新鲜度用 sessiongraph status 查；怀疑过期时用 sessiongraph_index 刷新。'
 }
+
+/**
+ * The session identity a tool call or prompt assembly is running for.
+ *
+ * Read structurally rather than through `@deepseek-ai/dsh-agent`: this module needs one string off
+ * the payload, and a static import of a host symbol is exactly what took this plugin's sibling off
+ * the host once (the export moved between minor releases).
+ * @param context - the tool-execution or assembly context the host passes in (`{ agent, scope, signal }`).
+ * @returns the agent's id, or `undefined` when the payload carries none.
+ */
+export function agentIdOf(context: unknown): string | undefined {
+  const agent = (context as { agent?: { id?: unknown } } | undefined)?.agent
+  const id = agent?.id
+  return typeof id === 'string' && id !== '' ? id : undefined
+}

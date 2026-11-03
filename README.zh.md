@@ -103,6 +103,10 @@
 
 想完全手动：`autoBuild: false` 关掉首次自动建库，`autoIndex: false` 连增量也关掉，之后一切靠 `sessiongraph_index` / `/sessiongraph index`。
 
+### 线上有新版本时
+
+**用完工具就说一声。** 插件没法自我升级——它装在 profile 的依赖树里，改那棵树是宿主的事。所以它做次优的那件事：某个工具被调用之后，后台查一次 registry，发现线上版本比正在运行的更新，就把一条通知追加进下一步的对话，模型和用户都看得见。三个细节让它不至于变成噪音：检查只在工具用过之后才发生，不会凭空提醒；同一条版本只提醒一次，`notifiedVersion` 落盘记着，重启桌面也不重播；查询间隔默认六小时，而查不到、超时、写盘失败都只是「没有可说的」，绝不影响工具本身。registry 按 npm 自己的顺序解析——`npm_config_registry` 环境变量优先，其次用户 `~/.npmrc` 里的 `registry=`，最后才是 npm 官方地址——所以配了镜像的机器查的就是那个镜像。`updateCheck: false` 关掉整个检查，`updateCheckIntervalMs` 调间隔。
+
 ### 索引什么
 
 只收有价值的：`user/message`（仅 `source.kind === 'user'`，即人真正打的字）、`assistant/message` 的 `text` 块（`reasoning` 占 61% 字节，不收）、`tool/call` 的名字与参数、`session/title`。跳过 `tool/result` 正文、`request/header`、`step/*`、`job/*`。
