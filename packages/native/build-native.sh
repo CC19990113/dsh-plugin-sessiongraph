@@ -34,9 +34,16 @@ case "$host_arch" in
     ;;
 esac
 
-# Prefer the toolchain whose architecture matches the host, when rustup has it installed.
+# Prefer the toolchain whose architecture matches the host, when rustup has it installed. Rustup
+# spells it `aarch64`, while `uname -m`/Node say `arm64`; getting this wrong silently falls back to
+# the x86_64 default and produces a binary an arm64 Node cannot load.
+case "$host_arch" in
+  arm64 | aarch64) rust_arch=aarch64 ;;
+  *) rust_arch="$host_arch" ;;
+esac
+
 if [ -z "${RUSTUP_TOOLCHAIN:-}" ] && command -v rustup >/dev/null 2>&1; then
-  native_toolchain="stable-$host_arch-apple-darwin"
+  native_toolchain="stable-$rust_arch-apple-darwin"
   if rustup toolchain list 2>/dev/null | sed 's/ .*//' | grep -qx "$native_toolchain"; then
     export RUSTUP_TOOLCHAIN="$native_toolchain"
     echo "build-native: using toolchain $native_toolchain (host $host_arch)"

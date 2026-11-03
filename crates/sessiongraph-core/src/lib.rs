@@ -119,7 +119,7 @@ pub struct IndexReport {
 /// (`sessiongraph_index`) already runs it on its own timeout budget.
 #[napi]
 pub fn index_sessions(options: IndexOptions) -> napi::Result<IndexReport> {
-    run_index(options).map_err(|reason| napi::Error::from_reason(reason))
+    run_index(options).map_err(napi::Error::from_reason)
 }
 
 /// Options after defaults and path resolution.
@@ -143,12 +143,12 @@ impl ResolvedOptions {
         }
         let max_entry_chars = match options.max_entry_chars {
             None => DEFAULT_MAX_ENTRY_CHARS,
-            Some(value) if value == 0 => return Err("maxEntryChars must be a positive integer".to_owned()),
+            Some(0) => return Err("maxEntryChars must be a positive integer".to_owned()),
             Some(value) => value,
         };
         let tool_call_chars = match options.tool_call_chars {
             None => DEFAULT_TOOL_CALL_CHARS,
-            Some(value) if value == 0 => return Err("toolCallChars must be a positive integer".to_owned()),
+            Some(0) => return Err("toolCallChars must be a positive integer".to_owned()),
             Some(value) => value,
         };
         let max_file_bytes = match options.max_file_bytes {
@@ -358,12 +358,12 @@ pub fn matches_session(filter: Option<&str>, id: &str) -> bool {
     }
 }
 
-/// Bound a failure reason to the contract's 200 characters.
+/// Bound a failure reason to the contract's 200 characters, ellipsis included.
 fn truncate_reason(reason: &str) -> String {
     if reason.chars().count() <= MAX_REASON_CHARS {
         return reason.to_owned();
     }
-    let truncated: String = reason.chars().take(MAX_REASON_CHARS).collect();
+    let truncated: String = reason.chars().take(MAX_REASON_CHARS - 1).collect();
     format!("{truncated}…")
 }
 
@@ -400,7 +400,7 @@ mod tests {
     fn reason_is_bounded_to_200_characters() {
         let long = "错".repeat(300);
         let bounded = truncate_reason(&long);
-        assert_eq!(bounded.chars().count(), 201);
+        assert_eq!(bounded.chars().count(), 200);
         assert!(bounded.ends_with('…'));
     }
 }

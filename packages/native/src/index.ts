@@ -55,6 +55,14 @@ export interface NativeIndexReport {
   skipped: number
   /** Sessions dropped because their source file disappeared. */
   removed: number
+  /**
+   * Live (still-running) sessions rebuilt from the host's in-memory view this run. The native
+   * kernel has no access to the host's `sessionQuery`, so it always reports 0: the caller's live
+   * pass owns those rows, and this kernel preserves them (`live://` rows are never removed here).
+   */
+  liveSessions?: number
+  /** Live sessions left out by the caller's cap. Always 0 from this kernel, for the same reason. */
+  liveSkipped?: number
   /** Sessions discovered in total across all source roots. */
   discovered: number
   /** Sessions that failed to parse, with a bounded reason. */

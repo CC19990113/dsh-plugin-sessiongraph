@@ -1,0 +1,3 @@
+# Built from crates/sessiongraph-core by ./build-native.sh — never commit it. The loader falls back
+# to `undefined` (and the native tests skip) when this file is absent.
+*.node

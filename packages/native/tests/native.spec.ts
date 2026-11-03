@@ -70,6 +70,7 @@ async function seedFixture(): Promise<{ a: string; b: string; c: string }> {
   const a = await writeSession('--Users-admin-www-demo--', 'aaaa1111-1111-4111-8111-111111111111', 4, [
     header('aaaa1111-1111-4111-8111-111111111111', '/Users/admin/www/demo'),
     humanMessage(1, 1_700_000_000_100, '我今天在改广告SDK'),
+    { type: 'turn/start', seq: 2, time: 1_700_000_000_150, data: { turn: 1 } },
     assistantMessage(2, 1_700_000_000_200, [
       { type: 'reasoning', text: 'reasoning-must-not-be-indexed' },
       { type: 'text', text: '好的，我们看 codegraph_index 的实现' },
@@ -90,6 +91,32 @@ async function seedFixture(): Promise<{ a: string; b: string; c: string }> {
     humanMessage(1, 1_700_000_000_500, 'Hello Native Kernel'),
   ])
   return { a, b, c }
+}
+
+/**
+ * Seed one live-session row the way the caller's live pass writes it: a synthetic `live://<id>`
+ * source path, zero mtime/size (there is no file version), plus its entry and FTS row.
+ */
+function seedLiveRow(sessionId: string, text: string): void {
+  const database = new DatabaseSync(indexPath)
+  try {
+    database
+      .prepare(
+        `INSERT INTO session
+           (id, workspace, title, created_at, last_at, parent_session, origin, agent_preset, turns,
+            entries, source_path, source_mtime, source_size)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(sessionId, '/Users/admin/www/live', null, 1, 2, null, 'user', null, 0, 1, `live://${sessionId}`, 0, 0)
+    const inserted = database
+      .prepare('INSERT INTO entry (session_id, seq, time, turn, kind, text, clipped) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(sessionId, 1, 2, null, 'user', text, 0)
+    database
+      .prepare('INSERT INTO entry_fts (rowid, tokens) VALUES (?, ?)')
+      .run(Number(inserted.lastInsertRowid), tokenize(text).join(' '))
+  } finally {
+    database.close()
+  }
 }
 
 /** Open the written index read-only. */
@@ -121,6 +148,10 @@ describe('native index kernel', () => {
     expect(report.updated).toBe(0)
     expect(report.skipped).toBe(0)
     expect(report.removed).toBe(0)
+    // The native kernel has no host `sessionQuery`, so it reports the optional live fields as 0
+    // rather than `undefined`: the caller's live pass owns those rows.
+    expect(report.liveSessions).toBe(0)
+    expect(report.liveSkipped).toBe(0)
     expect(report.failed).toEqual([])
     expect(report.sessions).toBe(3)
     expect(report.workspaces).toBe(2)
@@ -203,7 +234,8 @@ describe('native index kernel', () => {
     expect(third.updated).toBe(1)
     expect(third.skipped).toBe(2)
     expect(third.sessions).toBe(3)
-    expect(third.entries).toBe(4)
+    // Sessions B and C are untouched (one entry each); A now holds only its single rewritten message.
+    expect(third.entries).toBe(3)
   })
 
   it.skipIf(kernel === undefined)('removes sessions whose source file disappeared', async () => {
@@ -248,6 +280,95 @@ describe('native index kernel', () => {
     const database = openIndex()
     try {
       expect(database.prepare('SELECT COUNT(*) AS n FROM session WHERE id = ?').get('cccc3333-3333-4333-8333-333333333333')).toEqual({ n: 1 })
+    } finally {
+      database.close()
+    }
+  })
+
+  it.skipIf(kernel === undefined)('accepts the camelCase parse limits and file cap', async () => {
+    const long = 'x'.repeat(100)
+    await writeSession('--Users-admin-www-limits--', 'limits', 4, [
+      header('limits-id', '/Users/admin/www/limits'),
+      humanMessage(1, 1, long),
+      { type: 'tool/call', seq: 2, time: 2, data: { name: 'tool', arguments: long } },
+    ])
+
+    const report = kernel!.indexSessions({ sessionsRoot, indexPath, maxEntryChars: 20, toolCallChars: 10 })
+    expect(report.entries).toBe(2)
+
+    const database = openIndex()
+    try {
+      // napi maps the Rust `max_entry_chars`/`tool_call_chars` fields to these JS names; the entry
+      // text proves the values crossed the boundary rather than silently defaulting to 4000/2000.
+      expect(database.prepare('SELECT kind, text, clipped FROM entry ORDER BY id').all()).toEqual([
+        { kind: 'user', text: 'x'.repeat(20), clipped: 1 },
+        { kind: 'tool', text: 'tool xxxxx', clipped: 1 },
+      ])
+    } finally {
+      database.close()
+    }
+
+    // A log larger than the cap is reported, not parsed, and the run still writes a valid index.
+    const capped = kernel!.indexSessions({ sessionsRoot, indexPath, force: true, maxFileBytes: 10 })
+    expect(capped.failed).toHaveLength(1)
+    expect(capped.failed[0]!.reason).toContain('maxFileBytes')
+    expect(capped.failed[0]!.reason.length).toBeLessThanOrEqual(200)
+    expect(capped.sessions).toBe(0)
+  })
+
+  it.skipIf(kernel === undefined)('keeps the newer source when one session id appears twice', async () => {
+    // A v3 → v4 migration or a workspace move can leave the same id under two paths. Scan order is
+    // deterministic (workspace, then session dir), so this asserts the newer *mtime* wins, not the
+    // later path.
+    await writeSession('--Users-admin-www-one--', 'dup', 4, [
+      header('dup-id', '/Users/admin/www/one'),
+      humanMessage(1, 1, 'older copy'),
+    ])
+    await new Promise(resolve => setTimeout(resolve, 25))
+    await writeSession('--Users-admin-www-two--', 'dup', 4, [
+      header('dup-id', '/Users/admin/www/two'),
+      humanMessage(1, 1, 'newer copy'),
+    ])
+
+    const report = kernel!.indexSessions({ sessionsRoot, indexPath })
+    expect(report.discovered).toBe(2)
+    expect(report.sessions).toBe(1)
+    expect(report.entries).toBe(1)
+    // The superseded copy is not written at all: it is reported as skipped.
+    expect(report.skipped).toBe(1)
+
+    const database = openIndex()
+    try {
+      expect(database.prepare('SELECT workspace FROM session WHERE id = ?').get('dup-id')).toEqual({
+        workspace: '/Users/admin/www/two',
+      })
+      expect(database.prepare('SELECT text FROM entry').all()).toEqual([{ text: 'newer copy' }])
+    } finally {
+      database.close()
+    }
+  })
+
+  it.skipIf(kernel === undefined)('preserves live rows written by the caller\'s live pass', async () => {
+    await seedFixture()
+    kernel!.indexSessions({ sessionsRoot, indexPath })
+    seedLiveRow('live-session-1', '实时会话里的广告改动')
+
+    const report = kernel!.indexSessions({ sessionsRoot, indexPath })
+    // A file scan cannot see a live session, so "not in this scan" must not delete it.
+    expect(report.removed).toBe(0)
+    expect(report.skipped).toBe(3)
+    expect(report.sessions).toBe(4)
+    expect(report.entries).toBe(7)
+
+    const database = openIndex()
+    try {
+      expect(database.prepare('SELECT source_path, source_mtime, source_size FROM session WHERE id = ?').get('live-session-1')).toEqual({
+        source_path: 'live://live-session-1',
+        source_mtime: 0,
+        source_size: 0,
+      })
+      // The live entry is still searchable through the same bigram index.
+      expect(database.prepare('SELECT rowid FROM entry_fts WHERE entry_fts MATCH ?').all('"广告"')).toHaveLength(3)
     } finally {
       database.close()
     }

@@ -437,7 +437,7 @@ mod tests {
     fn clips_entry_and_tool_text_at_the_configured_cap() {
         let long = "x".repeat(50);
         let log = [
-            r#"{"type":"session","id":"abc","createdAt":1}"#,
+            r#"{"type":"session","id":"abc","createdAt":1}"#.to_owned(),
             format!(
                 r#"{{"type":"user/message","seq":1,"time":10,"data":{{"source":{{"kind":"user"}},"content":[{{"type":"text","text":"{long}"}}]}}}}"#
             ),
@@ -453,7 +453,8 @@ mod tests {
         let session = parse_jsonl(&log, "fallback", &limits);
         assert_eq!(session.entries[0].text.len(), 20);
         assert!(session.entries[0].clipped);
-        assert_eq!(session.entries[1].text.len(), 10 + "tool ".len());
+        // The name and arguments are one entry, clipped together to the tool-call cap.
+        assert_eq!(session.entries[1].text, "tool xxxxx");
         assert!(session.entries[1].clipped);
     }
 
