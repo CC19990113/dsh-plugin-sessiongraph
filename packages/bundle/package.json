@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-sessiongraph",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "Bundle for the sessiongraph capability — install this package to add local conversation-history search to a DeepSeek Harness profile",
   "keywords": [
     "dsh",
@@ -37,5 +37,10 @@
   },
   "scripts": {
     "prepack": "node -e \"require('node:fs').copyFileSync('../../README.md','README.md')\""
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   }
 }
