@@ -1,190 +1,192 @@
 # dsh-plugin-sessiongraph
 
-**把本机全部 DSH 会话历史当成一个可检索的库。**
+English | [中文](README.zh.md)
 
-你问「上次那个功能做到哪了」「哪次说过这句话」「哪个会话讨论过鸿蒙开屏」—— 模型直接查，不用你翻侧边栏，也不用 grep `~/.dsh/sessions`。
+**Every DSH session on this machine, indexed as one searchable corpus.**
 
-> 索引 `~/.dsh/sessions` 下**全部会话**，不是某个工作区。
-> 自动维护，不需要你记得去刷新。
+Ask "where did I work on that feature", "which session did I say this in", "who discussed splash-screen ads" — the model looks it up. No sidebar archaeology, no grepping `~/.dsh/sessions`.
 
-## 它解决什么
+> Indexes **every session** under `~/.dsh/sessions`, not just the caller's workspace.
+> Maintains itself; you never have to remember to refresh it.
 
-会话日志长这样：`~/.dsh/sessions/<工作区>/<会话id>/session.vN.jsonl.zstd`
+## What it solves
 
-| 问题 | 现实 |
+Session logs live at `~/.dsh/sessions/<workspace>/<session-id>/session.vN.jsonl.zstd`:
+
+| Problem | Reality |
 |---|---|
-| `grep` 搜不到 | 文件是 **zstd 压缩的 JSONL**，grep 读的是压缩字节 |
-| 内置 `session_search` 搜不了中文 | 它用 SQLite 的 `unicode61` 分词器，**没有任何 CJK 处理** —— `我今天在改广告SDK` 整句是一个 token，搜「广告」查不到 |
-| 跨工作区不方便 | 会话按 cwd 散在二十多个目录里，内置工具只作用于调用方工作区 |
-| 解压很慢 | 每个文件是**多帧 zstd**（一个 234KB 的文件含 113 个帧），`zstdDecompressSync` 只解第一帧；全量 641 个文件解压出来 **1.6GB** |
+| `grep` finds nothing | The files are **zstd-compressed JSONL** — grep reads compressed bytes |
+| The built-in session search cannot do Chinese | It uses SQLite's `unicode61` tokenizer with **no CJK handling at all**: `我今天在改广告SDK` is one single token, so searching `广告` matches nothing |
+| Cross-workspace is awkward | Sessions are scattered across dozens of escaped directories, and the built-in tools only see the caller's workspace |
+| Decompression is slow | Each file is **multi-frame zstd** (one 234 KB file can hold over a hundred frames); `zstdDecompressSync` returns only the first frame, so a naive read yields a few hundred bytes out of hundreds of KB. A mid-sized corpus decompresses to **gigabytes** |
 
-sessiongraph 把这些都处理掉：逐帧解压、按事件类型抽可检索条目、自建中文 bigram 索引、Rust 内核并行建库。
+sessiongraph handles all of it: frame-by-frame decompression, semantic event extraction, its own Chinese bigram index, and a parallel Rust kernel to build it.
 
-## 自动索引：不需要你管
+## Automatic indexing: nothing for you to run
 
-三道机制，全部自动：
+Three mechanisms, all automatic:
 
-| 时机 | 机制 | 耗时 |
+| When | Mechanism | Cost |
 |---|---|---|
-| **会话创建时** | `agent/created` → 后台增量（`ctx.jobs`），不阻塞会话 | 59–107ms |
-| **查询前** | `status.json` 的 `indexedAt` 超过 5 分钟就先增量再查 | 约 400ms |
-| **当前会话** | 接入宿主 `ctx.sessionQuery`，把**还没落盘**的 live 会话也索引进来 | 可忽略 |
+| **On session creation** | `agent/created` → background incremental run through `ctx.jobs`, never blocking the session | ~60–110 ms |
+| **Before a query** | If `status.json`'s `indexedAt` is older than 5 minutes, refresh incrementally first | ~400 ms |
+| **The current session** | Reads the host's `ctx.sessionQuery` and indexes **live** sessions that have not hit disk yet | negligible |
 
-手动入口仍然保留（`sessiongraph_index` / `/sessiongraph index`），但**日常你什么都不用做**。
+Manual entry points remain (`sessiongraph_index`, `/sessiongraph index`), but **day to day you do nothing**.
 
-只有首次需要建一次库（全量 6.8s，Rust 内核），之后一直增量。
+Only the very first build is explicit (a few seconds with the Rust kernel); everything after that is incremental.
 
-## 三个入口
+## Three entry points
 
-| 入口 | 用法 |
+| Entry | How |
 |---|---|
-| **模型自主调用** | 直接问「上次讨论鸿蒙开屏是哪个会话」，模型自己调 `sessiongraph` |
-| **斜杠命令** | `/sessiongraph status \| index \| search <词> \| workspaces` |
-| **命令结果回灌** | 敲完命令，结果作为 `plugin/notice` 消息注入会话 —— 模型下一轮就知道你查了什么（与 `/plan` 同一机制） |
+| **The model calls it** | Just ask; it reaches for `sessiongraph` on its own |
+| **Slash command** | `/sessiongraph status` / `index` / `search <term>` / `workspaces` |
+| **Command results flow back** | After the command runs, its result is injected into the conversation as a `plugin/notice` message, so the model's next turn knows what you looked up (the same mechanism `/plan` uses) |
 
-## 和 codegraph 的关系
+## Relationship to codegraph
 
-两个插件互补，索引的是**不同东西**：
+Sibling plugins indexing **different things**:
 
-| | **codegraph** | **sessiongraph**（本插件） |
+| | **codegraph** | **sessiongraph** (this plugin) |
 |---|---|---|
-| 索引什么 | 代码结构：声明、调用、导入、影响面 | 会话历史：消息、工具调用、命令 |
-| 数据源 | 工作区源码文件 | `~/.dsh/sessions` 的 zstd JSONL |
-| 解析器 | tree-sitter（WASM） | 自研 JSONL 抽取 + bigram 分词 |
-| 作用域 | **单个项目**（`.codegraph/codegraph.db` 在项目内） | **全机跨工作区**（`~/.dsh/sessiongraph/index.db`） |
-| 回答的问题 | 「这个函数谁在调」「改这里会影响什么」 | 「上次在哪个会话说过/做过什么」 |
-| 更新时机 | `ctx.fs.watch` 监听文件变化 | `agent/created` + 查询前惰性增量 |
-| 中文 | 一张任务词同义词表（`zh-synonyms.ts`） | **bigram 分词**，两字词直接命中 |
-| 原生内核 | 无（tree-sitter WASM） | **Rust + napi-rs** |
+| Indexes | Code structure: declarations, calls, imports, impact | Conversation history: messages, tool calls, commands |
+| Data source | Workspace source files | zstd JSONL under `~/.dsh/sessions` |
+| Parser | tree-sitter (WASM) | Purpose-built JSONL extraction + bigram tokenizer |
+| Scope | **One project** (`.codegraph/codegraph.db` inside it) | **Machine-wide, across workspaces** (`~/.dsh/sessiongraph/index.db`) |
+| Answers | "Who calls this function", "what does this change reach" | "Where did I say or do this last time" |
+| Refresh | `ctx.fs.watch` on file changes | `agent/created` + lazy refresh before queries |
+| Chinese | A task-vocabulary synonym table (`zh-synonyms.ts`) | **Bigram tokenization** — two-character terms match |
+| Native kernel | none (tree-sitter WASM) | **Rust via napi-rs** |
 
-一句话分工：**codegraph 查代码怎么连，sessiongraph 查你上次说了什么。**
+In one line: **codegraph tells you how the code connects; sessiongraph tells you what you said.**
 
-两者共用同一种架构：`service` 缝隙 + store/indexer provider 注册表 + 模型工具消费层。加一个新的 store 或 indexer，不需要动模型工具。
+Both share one architecture: a `service` seam, store/indexer provider registries, and a model-facing consumer layer. Adding a store or an indexer never touches the tools.
 
-## 性能（Rust 内核）
+## Performance (Rust kernel)
 
-Apple M2，645 会话 / 1.6GB 解压数据：
+On an Apple Silicon developer machine, a few hundred sessions / ~1.6 GB decompressed:
 
-| | 全量建索引 | 增量 | 查询延迟 | 索引体积 |
+| | Full rebuild | Incremental | Query | Index size |
 |---|---|---|---|---|
-| **Rust 内核**（napi-rs + Rayon + rusqlite） | **6.76s** | **59–107ms** | 0.1–6.9ms | 172 MB |
-| TypeScript（回落路径） | 19.22s | 230ms | 同上 | 172 MB |
-| 加速比 | **2.84×** | **约 3×** | — | — |
+| **Rust kernel** (napi-rs + Rayon + rusqlite) | **6.76 s** | **59–107 ms** | 0.1–6.9 ms | ~170 MB |
+| TypeScript (fallback path) | 19.22 s | 230 ms | same | ~170 MB |
+| Speed-up | **2.84×** | **~3×** | — | — |
 
-**两库内容完全一致**，不是「另一种索引」：
+**Both databases hold identical content** — this is not "a different index":
 
-- `sqlite_master` 建表语句逐字相同
-- 639 个未变会话的 session / entry / FTS token 全量比对 → **0 差异**
-- 两库 entry 行、session 行、FTS token 多重集的 **SHA-256 相同**
-- TS 写的 store 能直接读 Rust 建的库，反之亦然
+- `sqlite_master` DDL is byte-for-byte identical
+- Every unchanged session compared field by field (session / entry / FTS tokens) → **zero differences**
+- Entry rows, session rows and FTS token multisets hash to the **same SHA-256**
+- The TypeScript store reads a Rust-built database directly, and vice versa
 
-### 为什么是 napi-rs 不是 WASM
+### Why napi-rs, not WASM
 
-内核要**直接读文件系统**（641 个日志）、**写 SQLite**（95k 条 + FTS5）、处理 **1.6GB** 数据。WASM 的边界拷贝和 fs/sqlite 缺失是硬伤；napi-rs 可以用 Rayon 真多线程解压解析。
+The kernel must **read the filesystem directly** (hundreds of logs), **write SQLite** (six-figure entry counts plus FTS5), and move **gigabyte-scale** data. WASM's boundary copies and lack of fs/sqlite are disqualifying; napi-rs gets real multi-threaded decompression and parsing through Rayon.
 
-### 引擎选择
+### Engine selection
 
 ```ts
-engine: 'auto'        // 默认：有原生就用，没有静默回落 TS
-engine: 'native'      // 显式要求，不可用时回落并报一次错
-engine: 'typescript'  // 强制 TS
+engine: 'auto'        // default: use the native kernel when present, silently fall back otherwise
+engine: 'native'      // require it; falls back and logs one error if unavailable
+engine: 'typescript'  // force the TypeScript path
 ```
 
-没有 `.node` 的机器（架构不匹配、没编译）**完全等同旧行为**，不会因为缺二进制而报错。
+A machine without the `.node` binary (wrong architecture, never built) behaves **exactly as before** — a missing binary is never an error.
 
-编译：
+Build it with:
 
 ```sh
 packages/native/build-native.sh
 ```
 
-> 坑：本机 rustup 默认是 Rosetta 的 `x86_64` toolchain，产物在 arm64 Node 里加载会报 incompatible architecture。脚本会自动选 `aarch64-apple-darwin` 并用 `file` 校验架构。
+> Gotcha: when rustup's default toolchain does not match the Node architecture (typically a Rosetta `x86_64` toolchain next to an arm64 Node), loading the artifact fails with "incompatible architecture". The script pins `aarch64-apple-darwin` and verifies the result with `file`.
 
-## 索引什么
+## What gets indexed
 
-只收有价值的，跳过噪音（25 个会话采样的字节占比）：
+Only what is worth searching, by event type (byte shares measured across a session sample):
 
-| 事件 | 收 | 说明 |
+| Event | Indexed | Why |
 |---|---|---|
-| `user/message` | ✅ | 仅 `source.kind === 'user'`（人真正打的字）；runtime-context / skill-catalog / 插件注入全跳过 |
-| `assistant/message` | ✅ | 仅 `content[].type === 'text'`；`reasoning`（思维链，占 **61%** 字节）不索引 |
-| `tool/call` | ✅ | 工具名 + 参数（截断 2KB） |
-| `session/title` | ✅ | 取最后一条 |
-| `tool/result` | ❌ | 正文占 15%，检索价值低 |
-| `request/header` / `step/*` / `job/*` | ❌ | 噪音 |
+| `user/message` | yes | Only `source.kind === 'user'` — text a human actually typed. Runtime context, skill catalogs and plugin injections are skipped |
+| `assistant/message` | yes | Only `content[].type === 'text'`. `reasoning` is **61%** of all bytes and is not indexed |
+| `tool/call` | yes | Tool name plus arguments (clipped at 2 KB) |
+| `session/title` | yes | Latest one wins |
+| `tool/result` | no | 15% of the bytes, little retrieval value |
+| `request/header`, `step/*`, `job/*` | no | Noise |
 
-结果：95k 条目里 tool 调用占 76%、assistant 正文 19%、user 3%、标题 2%。
+Resulting mix: tool calls 76%, assistant text 19%, user messages 3%, titles 2%.
 
-## 中文检索为什么能两字词命中
+## Why two-character Chinese terms match
 
-SQLite 3.50.4 实测：
+Measured on SQLite 3.50.4 — does `广告` match `我今天在改广告SDK`?
 
-| 方案 | 「广告」能否命中 `我今天在改广告SDK` |
+| Tokenizer | Result |
 |---|---|
-| `unicode61` | ❌ 整句是一个 token |
-| `trigram` | ❌ 要求 ≥3 字符，两字词无解 |
-| **自建 bigram** | ✅ |
+| `unicode61` | no — the whole sentence is one token |
+| `trigram` | no — requires three characters, so two-character words never match |
+| **Own bigram index** | yes |
 
-做法：写入和查询用**同一个分词器**（`packages/service/src/tokenize.ts`）——
+Write and read paths share **one tokenizer** (`packages/service/src/tokenize.ts`):
 
-- 中文连续段 → 重叠双字：`广告点击` → `广告` `告点` `点击`
-- 英文/数字段 → 小写整词，按 `_` 切分（`codegraph_index` → `codegraph` `index`）
-- 查询 token 双引号包裹 + `AND` 连接
+- CJK runs → overlapping bigrams: `广告点击` → `广告` `告点` `点击`
+- Latin/digit runs → lowercased whole words, split on `_` (`codegraph_index` → `codegraph` `index`)
+- Query tokens are double-quoted and joined with `AND`
 
-代价是召回优先而非短语精确匹配（`广告跳转` 可以匹配字符不相邻的条目）。查历史要的是「找得到」，这个取舍成立。
+The trade-off is recall over phrase precision: `广告跳转` may match an entry where those characters are not adjacent. Searching your own history is a "find it" problem, not a "match this exact phrase" problem — so the trade is the right one.
 
-## 工具
+## Tools
 
 ### `sessiongraph`
 
-| operation | 作用 |
+| Operation | What it does |
 |---|---|
-| `search` | 跨会话全文检索，可按 `workspace` / `after` / `before` / `kinds` 过滤；返回标题、工作区、时间、轮次、命中片段（`[词]` 高亮） |
-| `session` | 按完整 id 或**唯一前缀**打开一个会话：元信息 + 有序条目 + 子会话 |
-| `timeline` | 按时间列会话（可过滤工作区），新→旧 |
-| `workspaces` | 工作区清单与统计 |
-| `status` | 索引自身状态；**唯一在无索引时也能回答的操作** |
+| `search` | Cross-session full-text search; filters on `workspace`, `after`, `before`, `kinds`. Returns title, workspace, time, turn, and a highlighted snippet |
+| `session` | Open one session by full id or **unique prefix**: metadata, ordered entries, child sessions |
+| `timeline` | List sessions newest-first, optionally scoped to a workspace |
+| `workspaces` | Workspace inventory with session/entry counts and time spans |
+| `status` | The index's own state — **the only operation that answers before an index exists** |
 
 ### `sessiongraph_index`
 
-建或刷新索引，独立 300s 预算。源文件 mtime+size 未变就跳过；会话攒到 1000+ 时自动转后台 job 并返回 jobId。
+Build or refresh, on its own 300-second budget. Sessions whose source mtime and size are unchanged are skipped; past a thousand sessions the run becomes a host background job and returns a job id.
 
-## 装
+## Install
 
 ```sh
 dsh plugin add dsh-plugin-sessiongraph
 ```
 
-或在 profile 里 `link:` 本地目录：
+Or link a local checkout in a profile:
 
 ```json
 "dependencies": { "dsh-plugin-sessiongraph": "link:/path/to/dsh-plugin-sessiongraph" },
 "dsh": { "profile": { "bundles": [ "...", "dsh-plugin-sessiongraph" ] } }
 ```
 
-装完重启 DSH。首次调用 `sessiongraph_index` 建库（之后自动增量）。
+Restart DSH afterwards. The first `sessiongraph_index` call builds the database; everything after that is incremental.
 
-## 架构
+## Architecture
 
-| 包 | 角色 |
+| Package | Role |
 |---|---|
-| `service` | 定义 `ctx.sessiongraph` 缝隙：查询词汇、store/indexer 注册表、schema v1、bigram 分词器 |
-| `sqlite` | 读 provider：从 `index.db` 回答五个查询 |
-| `sessions` | 写 provider：扫描 + 逐帧解压 + 解析 + 写库（TS 与 Rust 双引擎） |
-| `tool` | 消费者：两个模型工具 + `/sessiongraph` 命令 + 系统提示段 |
-| `native` | Rust 内核的加载器（失败返回 `undefined`，绝不抛） |
-| `bundle` | 安装元包：`cordis.patch.yml` |
+| `service` | Defines the `ctx.sessiongraph` seam: query vocabulary, store/indexer registries, schema v1, bigram tokenizer |
+| `sqlite` | Read provider: answers the five queries from `index.db` |
+| `sessions` | Write provider: scan, frame-by-frame decode, parse, write (TypeScript and Rust engines) |
+| `tool` | Consumer: the two model tools, the `/sessiongraph` command, and the system-prompt section |
+| `native` | Loader for the Rust kernel — returns `undefined` on any failure, never throws |
+| `bundle` | Installable meta-package: `cordis.patch.yml` |
 
-**路由是「恰好一个认领者」，不是首个匹配**：每次查询并发问所有 store，0 个或多个认领者都抛错（`SESSIONGRAPH_UNAVAILABLE` / `SESSIONGRAPH_CONFLICT`），所以注册顺序和热重载不影响结果。
+**Routing is "exactly one claimant", never first match.** Every registered store is asked concurrently on every query; zero claimants and several claimants both throw (`SESSIONGRAPH_UNAVAILABLE` / `SESSIONGRAPH_CONFLICT`). Registration order and hot reload therefore never change the result.
 
-**`status` 是唯一不需要索引服务也能回答的操作** —— 从没建过库的人需要知道「还没建」，而不是收到一个和别处一样的失败。
+**`status` is the one operation that answers with no store at all** — someone who has never built an index needs to learn that fact, not receive the same failure every other operation raises.
 
-## 开发
+## Development
 
 ```sh
 pnpm install
-pnpm build      # tsc -b，五个 TS 项目引用
-pnpm test       # vitest run，200+ 测试
+pnpm build      # tsc -b, five TypeScript project references
+pnpm test       # vitest run, 200+ tests
 ```
 
-内部契约（数据格式、schema、分词规则、各包职责、DSH 能力复用决策）见 [`DESIGN.md`](./DESIGN.md)。
+Internal contracts — data format, schema, tokenizer rules, per-package responsibilities, and which host capabilities this plugin reuses — live in [`DESIGN.md`](./DESIGN.md).

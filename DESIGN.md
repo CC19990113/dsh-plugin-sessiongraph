@@ -3,21 +3,21 @@
 > 目标：把本机 `~/.dsh/sessions` 下**全部会话**当成一个仓库，预建一份 SQLite 索引，
 > 让模型通过 `sessiongraph` 工具**秒级**检索「上次在哪个会话里说过/做过什么」。
 
-## 1. 数据源（实测，2026-11-03）
+## 1. 数据源
 
 布局：`~/.dsh/sessions/<escaped-cwd>/<session-id>/session.v4.jsonl.zstd`
 
-- `<escaped-cwd>`：工作区绝对路径转义，形如 `--Users-admin-www-xxx--`
+- `<escaped-cwd>`：工作区绝对路径转义，形如 `--Users-<user>-www-<project>--`
 - 会话目录：`037ad8fc-29b8-4a69-9a02-e75f9cc8fb45`（**裸 uuid，无 `session-` 前缀**）
 - 文件：`session.v4.jsonl.zstd`（zstd 压缩的 JSONL），另有 `session.lock`（忽略）
-- 规模（2026-11-03 实测）：**641 个会话**（`session.v4` 494 个 + `session.v3` 147 个）/ 25 个工作区 /
-  617M 压缩 / 解压 **1.6GB** / 最大单会话 41.83MB / 全量逐帧解压 7.1s（不含 JSON 解析）
+- 规模参考：一个日常开发机量级的库约六百余个会话（`session.v4` 为主，`session.v3` 为历史遗留）/
+  二十余个工作区 / 压缩比约 3×（举例：617MB 压缩解压出 1.6GB）/ 单会话最大可达数十 MB
 - 版本差异：`v3` 的目录名与 header `id` 都带 `session-` 前缀，`v4` 是裸 uuid；
   事件结构两版兼容，`user/message.data.source.kind` 两版都有
 
 ### 解压：多帧 zstd（**最容易踩的坑**）
 
-实测（2026-11-03）：会话文件是**多帧 zstd 追加写**的，一个 234KB 的文件含 113 个 frame。
+会话文件是**多帧 zstd 追加写**的：一个 200KB 量级的文件可以含上百个 frame。
 `zstdDecompressSync(buf)` 只解压**第一帧**（该文件只出 292 字节），必须按 magic number
 `28 B5 2F FD` 切帧、逐帧解压、拼接。
 
@@ -42,8 +42,7 @@ function decompressSessionLog(buffer: Buffer): Buffer {
 }
 ```
 
-实测：641 个文件全部逐帧解压成功、0 失败，解压总量 1.6GB，最大单会话 41.83MB，
-全量解压 7.1s（不含 JSON 解析）。
+实测：一个六百余文件的日志库全部逐帧解压成功、0 失败。
 
 用 `node:zlib`，**不要**调用外部 `zstd` 二进制。
 
@@ -53,7 +52,7 @@ function decompressSessionLog(buffer: Buffer): Buffer {
 
 ```json
 {"type":"session","version":4,"id":"...","createdAt":1793349570839,
- "cwd":"/Users/admin/www/dsh-community","parentSession":"session-xxx",
+ "cwd":"/path/to/project","parentSession":"session-xxx",
  "isSeeded":false,"origin":"subagent","delegationDepth":1,"agentPreset":"standard"}
 ```
 
@@ -171,9 +170,9 @@ schema 见 `packages/service/src/schema.ts`（`SCHEMA_STATEMENTS`），三方共
 
 | 时机 | 机制 | 成本 | 作用 |
 |---|---|---|---|
-| 会话创建 | `agent/created` → `ctx.jobs` 后台增量 | 90–274ms（后台） | 开新会话时把上个会话的内容补进来 |
-| 查询前 | `status.json` 的 `indexedAt` 超过 `freshnessThresholdMs`（默认 5 分钟）→ 先增量再查 | 90–274ms（同步，仅超阈值时） | 当前会话刚说过的话也能查到 |
-| 显式 | `sessiongraph_index` 工具 / 手动 | 全量 6.8s（Rust）/ 19.2s（TS），或增量 | 首次建库、强制刷新 |
+| 会话创建 | `agent/created` → `ctx.jobs` 后台增量 | 百毫秒级（后台） | 开新会话时把上个会话的内容补进来 |
+| 查询前 | `status.json` 的 `indexedAt` 超过 `freshnessThresholdMs`（默认 5 分钟）→ 先增量再查 | 百毫秒级（同步，仅超阈值时） | 当前会话刚说过的话也能查到 |
+| 显式 | `sessiongraph_index` 工具 / 手动 | 全量（Rust 个位数秒 / TS 十几秒）或增量 | 首次建库、强制刷新 |
 
 **没有索引时不自动建**：首建要几秒到几十秒，必须由模型或用户显式触发（`sessiongraph_index`）。自动路径只维护「已有索引」。
 
@@ -183,7 +182,7 @@ schema 见 `packages/service/src/schema.ts`（`SCHEMA_STATEMENTS`），三方共
 
 ## 10. 为什么不用 `ctx.fs.watch`
 
-`ctx.fs` 是**工作区**抽象，`resolve/listDir/watch` 都相对当前 session 的 `cwd`。会话日志在 `~/.dsh/sessions`，是宿主本机路径，不属于任何工作区 —— 走 fs seam 既解析不到，也没有额外好处。真要「文件变化即索引」得用本地 `fs.watch` 监听 641 个会话目录，开销远大于收益；查询前惰性增量（90–274ms）更简单可靠。
+`ctx.fs` 是**工作区**抽象，`resolve/listDir/watch` 都相对当前 session 的 `cwd`。会话日志在 `~/.dsh/sessions`，是宿主本机路径，不属于任何工作区 —— 走 fs seam 既解析不到，也没有额外好处。真要「文件变化即索引」得用本地 `fs.watch` 监听每一个会话目录，开销远大于收益；查询前惰性增量更简单可靠。
 
 ## 11. 复用宿主能力（不重造轮子）
 
@@ -204,7 +203,7 @@ DSH 内核已经有一整套会话查询设施，能用的直接用：
 
 ## 12. 数据源混合模式
 
-- **主路径**：文件扫描 + 多帧解压 + `mtime`/`size` 增量（645 会话：Rust 全量 6.8s / TS 19.2s，增量 59–274ms）
+- **主路径**：文件扫描 + 多帧解压 + `mtime`/`size` 增量（量级参考：Rust 全量个位数秒 / TS 十几秒，增量百毫秒级）
 - **补充路径**：每轮问 `sessionQuery.listSessions()`，挑 `live === true` 的（通常 1–3 个），`readSession()` 拿事件后重建。上限 `maxLiveSessions`（默认 8）
 - live 会话每轮都重建（它们还在变，没有稳定 mtime 可依赖）
 - live 路径放在主写事务**之外**，`readSession` 回放慢也不拖长主索引
