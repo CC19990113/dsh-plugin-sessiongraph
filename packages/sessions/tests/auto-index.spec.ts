@@ -39,6 +39,7 @@ function config(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     toolCallChars: 2_000,
     maxFileBytes: 64 * 1024 * 1024,
     autoIndex: true,
+    autoBuild: true,
     backgroundIndexThreshold: 1_000,
     maxLiveSessions: 8,
     engine: 'typescript',
@@ -166,10 +167,22 @@ describe('automatic index on session creation', () => {
     expect(existsSync(join(fixture.indexRoot, SessionsPlugin.STATUS_RELATIVE_PATH))).toBe(true)
   })
 
-  it('does not auto-build a machine that has no index yet', async () => {
+  it('builds the first index in the background when none exists', async () => {
     await writeSessionLog()
     const { started, jobs } = fakeJobs()
     const ctx = await mount({ jobs })
+
+    emitAgentCreated(ctx, '/Users/admin/www/demo')
+
+    expect(started).toHaveLength(1)
+    expect(started[0]?.spec.label).toContain('first build')
+    expect(existsSync(join(fixture.indexRoot, 'index.db'))).toBe(false)
+  })
+
+  it('leaves a machine with no index alone when autoBuild is false', async () => {
+    await writeSessionLog()
+    const { started, jobs } = fakeJobs()
+    const ctx = await mount({ jobs, config: { autoBuild: false } })
 
     emitAgentCreated(ctx, '/Users/admin/www/demo')
 

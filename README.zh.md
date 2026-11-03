@@ -92,15 +92,16 @@
 
 ### 自动索引
 
-日常不需要手动刷新，三道机制兜住：
+**装完什么都不用做。** 四道机制兜住，全部自动：
 
 | 时机 | 机制 | 耗时 |
 |---|---|---|
-| **会话创建时** | `agent/created` → 后台增量（`ctx.jobs`），不阻塞会话 | 59–107ms |
+| **首次**（还没有索引） | 会话创建时后台建库（`autoBuild`，默认开） | 几秒到几分钟，后台跑，不阻塞会话 |
+| **会话创建时**（已有索引） | `agent/created` → 后台增量（`ctx.jobs`） | 59–107ms |
 | **查询前** | `status.json` 的 `indexedAt` 超过 5 分钟就先增量再查 | 约 400ms |
 | **当前会话** | 接入宿主 `ctx.sessionQuery`，把还没落盘的 live 会话也索引进来 | 可忽略 |
 
-只有首次建库需要显式跑一次 `sessiongraph_index`。
+想完全手动：`autoBuild: false` 关掉首次自动建库，`autoIndex: false` 连增量也关掉，之后一切靠 `sessiongraph_index` / `/sessiongraph index`。
 
 ### 索引什么
 

@@ -170,11 +170,14 @@ schema 见 `packages/service/src/schema.ts`（`SCHEMA_STATEMENTS`），三方共
 
 | 时机 | 机制 | 成本 | 作用 |
 |---|---|---|---|
-| 会话创建 | `agent/created` → `ctx.jobs` 后台增量 | 百毫秒级（后台） | 开新会话时把上个会话的内容补进来 |
+| 首次（还没有索引） | `agent/created` → `ctx.jobs` 后台**建库**（`autoBuild`，默认 true） | 秒级到分钟级（后台，不阻塞会话） | 装完即用，不需要人先跑一次命令 |
+| 会话创建（已有索引） | `agent/created` → `ctx.jobs` 后台增量 | 百毫秒级（后台） | 开新会话时把上个会话的内容补进来 |
 | 查询前 | `status.json` 的 `indexedAt` 超过 `freshnessThresholdMs`（默认 5 分钟）→ 先增量再查 | 百毫秒级（同步，仅超阈值时） | 当前会话刚说过的话也能查到 |
-| 显式 | `sessiongraph_index` 工具 / 手动 | 全量（Rust 个位数秒 / TS 十几秒）或增量 | 首次建库、强制刷新 |
+| 显式 | `sessiongraph_index` 工具 / 手动 | 全量（Rust 个位数秒 / TS 十几秒）或增量 | 强制刷新、脚本化场景 |
 
-**没有索引时不自动建**：首建要几秒到几十秒，必须由模型或用户显式触发（`sessiongraph_index`）。自动路径只维护「已有索引」。
+**首建也走后台**：它要读全机日志，可能几十秒到几分钟，所以和增量一样交给 `ctx.jobs`，绝不阻塞会话创建。`autoBuild: false` 可以关掉它，回到「必须显式触发才建库」的严格行为；`autoIndex: false` 连增量也一并关掉。
+
+**依赖**：自动路径需要宿主有 `jobs` 服务（用 `ctx.get` 探测，拿不到就静默跳过），并且只对「会话带 cwd」的情况触发。进程内每个 indexRoot 只触发一次，避免连开多个会话排队多次索引。
 
 **大库转后台**：`status.json` 的 `sessions` ≥ `backgroundIndexThreshold`（默认 1000）时，`sessiongraph_index` 走 `ctx.jobs.start`，工具立刻返回 job id 而不是占满 300s 预算。
 

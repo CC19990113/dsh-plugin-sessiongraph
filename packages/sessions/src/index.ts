@@ -14,10 +14,11 @@
  * rebuilds every log into a temporary file that replaces the old index atomically. A single bad log
  * is reported in `failed` and never aborts the run.
  *
- * Every session creation also refreshes an **existing** index in the background (`agent/created`,
- * `autoIndex`): a machine that already has one stays fresh without the model remembering to ask. A
- * missing index is deliberately left alone — the first build reads every log on the machine and is
- * the caller's explicit decision (`sessiongraph_index`), not something to trigger on a session start.
+ * Every session creation also does indexing work in the background (`agent/created`, `autoIndex`):
+ * an existing index is refreshed incrementally, and a missing one is built from scratch (`autoBuild`,
+ * default true) so a fresh install becomes searchable without the user running anything. Both runs
+ * go through the host's job registry and never block session creation. `autoBuild: false` restores
+ * the stricter behaviour where nothing is indexed until the caller asks for it.
  *
  * Sessions the host still holds in memory (`ctx.sessionQuery`) are indexed as well, in a second pass
  * after the file-path transaction commits: a conversation that is still running has no log on disk
@@ -133,10 +134,17 @@ export interface Config {
   /** Logs larger than this are skipped and reported in `failed` (default 67108864). */
   maxFileBytes?: number
   /**
-   * Refresh an existing index in the background whenever a session is created (default true). A
-   * machine with no index yet is skipped on purpose — see {@link DEFAULT_INDEX_ROOT}.
+   * Do indexing work in the background whenever a session is created (default true). With no index
+   * yet this builds the first one; with one already present it refreshes incrementally.
    */
   autoIndex?: boolean
+  /**
+   * Build the very first index automatically in the background when a session starts (default
+   * true). The first build reads every log on the machine and can take seconds to minutes, so it
+   * runs as a host background job and never blocks session creation. Set false to require an
+   * explicit `sessiongraph_index` / `/sessiongraph index` before anything is searchable.
+   */
+  autoBuild?: boolean
   /**
    * Hand an explicit index run to the host's background-job registry once the session store holds at
    * least this many logs (default 1000). Below it the run is synchronous, because a small index is
@@ -163,6 +171,7 @@ export const Config: z<Config> = z.object({
   toolCallChars: z.number().default(DEFAULT_TOOL_CALL_CHARS),
   maxFileBytes: z.number().default(DEFAULT_MAX_FILE_BYTES),
   autoIndex: z.boolean().default(true),
+  autoBuild: z.boolean().default(true),
   backgroundIndexThreshold: z.number().default(DEFAULT_BACKGROUND_INDEX_THRESHOLD),
   maxLiveSessions: z.number().default(DEFAULT_MAX_LIVE_SESSIONS),
   engine: z.union([z.const('auto'), z.const('native'), z.const('typescript')]).default(DEFAULT_ENGINE),
@@ -361,9 +370,11 @@ function scheduleAutoIndex(
     const indexRoot = expandHome(config.indexRoot)
     // Once per root per process: a burst of session creations must not queue a burst of index runs.
     if (autoIndexed.has(indexRoot)) return
-    // Only an index that already exists is refreshed: the first build reads every log on the
-    // machine, and that is the caller's explicit decision, not something a session start triggers.
-    if (!hasExistingIndex(indexRoot)) return
+    // A first build reads every log on the machine and can take a while, so it stays a background
+    // job like the incremental refresh. `autoBuild: false` restores the stricter behaviour where
+    // nothing becomes searchable until someone asks for it.
+    const existing = hasExistingIndex(indexRoot)
+    if (!existing && !config.autoBuild) return
     // `ctx.get` rather than an `inject` entry: background jobs are a host composition choice, and
     // requiring the service would hide this whole indexer from a profile that runs none.
     const jobs = ctx.get('jobs') as AutoIndexJobRegistry | undefined
@@ -372,7 +383,9 @@ function scheduleAutoIndex(
       // The registry keys a job by its owning session id, not the agent object.
       owner: agent.id,
       kind: AUTO_INDEX_JOB_KIND,
-      label: `sessiongraph refresh for ${workspace}`,
+      label: existing
+        ? `sessiongraph refresh for ${workspace}`
+        : `sessiongraph first build for ${workspace}`,
       run: handle => runIndexJob(indexRoot, {}, config, handle),
     })
     // Marked only after the registry accepted the job, so a refusal leaves the root eligible for

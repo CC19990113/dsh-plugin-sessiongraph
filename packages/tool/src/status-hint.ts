@@ -103,8 +103,9 @@ export function indexStatusHint(indexRoot: string): string {
   const indexPath = join(indexRoot, INDEX_RELATIVE_PATH)
   const index = statFile(indexPath)
   if (index === undefined) {
-    return `这台机器还没有 sessiongraph 索引（${indexPath}）。要检索过去的对话就先调用 sessiongraph_index 建一次：`
-      + '它会扫描 ~/.dsh/sessions 下的全部会话，首次可能要几分钟，走它自己的 300 秒预算。'
+    return `这台机器还没有 sessiongraph 索引（${indexPath}）。新会话创建时会在后台自动建一次：`
+      + '它会扫描 ~/.dsh/sessions 下的全部会话，首次可能要几十秒到几分钟，不阻塞会话。'
+      + '要立刻建就调用 sessiongraph_index（它有独立的 300 秒预算）；建好之前除 status 外都会失败。'
   }
   const status = readIndexStatus(indexRoot)
   if (status !== undefined) {

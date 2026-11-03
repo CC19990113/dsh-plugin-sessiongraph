@@ -92,15 +92,16 @@ Memory does not overlap with either: a conversation may **never enter memory** (
 
 ### Automatic indexing
 
-Three mechanisms, all automatic:
+**A fresh install needs nothing from you.** Four mechanisms, all automatic:
 
 | When | Mechanism | Cost |
 |---|---|---|
-| **On session creation** | `agent/created` → background incremental run through `ctx.jobs`, never blocking | 59–107 ms |
+| **The first time** (no index yet) | Session creation builds it in the background (`autoBuild`, on by default) | seconds to minutes, off the critical path |
+| **On session creation** (index present) | `agent/created` → incremental run through `ctx.jobs`, never blocking | 59–107 ms |
 | **Before a query** | If `status.json`'s `indexedAt` is older than 5 minutes, refresh incrementally first | ~400 ms |
 | **The current session** | Reads the host's `ctx.sessionQuery` and indexes live sessions that have not hit disk yet | negligible |
 
-Only the very first build needs an explicit `sessiongraph_index` call.
+Prefer to drive it yourself? `autoBuild: false` disables the first automatic build and `autoIndex: false` disables the incremental refreshes; everything then goes through `sessiongraph_index` / `/sessiongraph index`.
 
 ### What gets indexed
 
