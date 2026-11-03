@@ -31,5 +31,15 @@
     "typescript": "^5.9.0",
     "vite-tsconfig-paths": "^5.1.4",
     "vitest": "^4.1.8"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CC19990113/dsh-plugin-sessiongraph.git"
+  },
+  "homepage": "https://github.com/CC19990113/dsh-plugin-sessiongraph#readme",
+  "bugs": {
+    "url": "https://github.com/CC19990113/dsh-plugin-sessiongraph/issues"
+  },
+  "license": "MIT",
+  "author": "CC ZHAO"
 }
