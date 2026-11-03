@@ -173,9 +173,9 @@ schema 见 `packages/service/src/schema.ts`（`SCHEMA_STATEMENTS`），三方共
 |---|---|---|---|
 | 会话创建 | `agent/created` → `ctx.jobs` 后台增量 | 90–274ms（后台） | 开新会话时把上个会话的内容补进来 |
 | 查询前 | `status.json` 的 `indexedAt` 超过 `freshnessThresholdMs`（默认 5 分钟）→ 先增量再查 | 90–274ms（同步，仅超阈值时） | 当前会话刚说过的话也能查到 |
-| 显式 | `sessiongraph_index` 工具 / 手动 | 全量 21s 或增量 | 首次建库、强制刷新 |
+| 显式 | `sessiongraph_index` 工具 / 手动 | 全量 6.8s（Rust）/ 19.2s（TS），或增量 | 首次建库、强制刷新 |
 
-**没有索引时不自动建**：首建 21s 太重，必须由模型或用户显式触发（`sessiongraph_index`）。自动路径只维护「已有索引」。
+**没有索引时不自动建**：首建要几秒到几十秒，必须由模型或用户显式触发（`sessiongraph_index`）。自动路径只维护「已有索引」。
 
 **大库转后台**：`status.json` 的 `sessions` ≥ `backgroundIndexThreshold`（默认 1000）时，`sessiongraph_index` 走 `ctx.jobs.start`，工具立刻返回 job id 而不是占满 300s 预算。
 
@@ -204,7 +204,7 @@ DSH 内核已经有一整套会话查询设施，能用的直接用：
 
 ## 12. 数据源混合模式
 
-- **主路径**：文件扫描 + 多帧解压 + `mtime`/`size` 增量（638 会话 21s / 增量 90–274ms）
+- **主路径**：文件扫描 + 多帧解压 + `mtime`/`size` 增量（645 会话：Rust 全量 6.8s / TS 19.2s，增量 59–274ms）
 - **补充路径**：每轮问 `sessionQuery.listSessions()`，挑 `live === true` 的（通常 1–3 个），`readSession()` 拿事件后重建。上限 `maxLiveSessions`（默认 8）
 - live 会话每轮都重建（它们还在变，没有稳定 mtime 可依赖）
 - live 路径放在主写事务**之外**，`readSession` 回放慢也不拖长主索引
