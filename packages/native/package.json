@@ -49,9 +49,6 @@
     "build": "tsc -b",
     "build:native": "./build-native.sh"
   },
-  "optionalDependencies": {
-    "dsh-plugin-sessiongraph-native-darwin-arm64": "0.1.0"
-  },
   "devDependencies": {
     "@types/node": "^22.10.0"
   }
