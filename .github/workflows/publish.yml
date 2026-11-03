@@ -44,6 +44,23 @@ jobs:
       - name: Stage bundle README
         run: cp README.md packages/bundle/README.md
 
+      # Publishing is irreversible, so it is skipped when that version already
+      # exists. This matters because a release can be created *after* the tarballs
+      # went out by hand (`npm publish <tarball>`) — without the guard the workflow
+      # would fail with a 409 the day someone edits an old release.
+      - name: Check whether this version is already on the registry
+        id: registry
+        run: |
+          version=$(node -p "require('./packages/bundle/package.json').version")
+          if npm view "dsh-plugin-sessiongraph-bundle@${version}" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::dsh-plugin-sessiongraph-bundle@${version} is already published; skipping."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       # `pnpm -r publish` walks the workspace in dependency order and rewrites
       # every `workspace:^` range into the concrete published version.
       #
@@ -51,7 +68,13 @@ jobs:
       # artifact (gitignored, produced by `build-native.sh`), so a fresh install
       # falls back to the TypeScript indexer until someone builds it locally.
       # That is the documented behaviour, not a missing step.
+      #
+      # `publishConfig.provenance` stays false for now: npm stages a **new**
+      # package's first publish and refuses to unpublish the staged version, so a
+      # provenance-bearing first release can leave the version slot unusable.
+      # Turn it back on once every package name already exists on the registry.
       - name: Publish
+        if: steps.registry.outputs.published == 'false'
         run: pnpm -r publish --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
