@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-sessiongraph-sessions",
-  "version": "0.1.10",
+  "version": "0.1.12",
   "description": "Session-log indexer for DeepSeek Harness — scans ~/.dsh/sessions, decompresses the multi-frame zstd JSONL logs and writes the sessiongraph SQLite index the store reads",
   "keywords": [
     "dsh",
