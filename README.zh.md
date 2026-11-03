@@ -44,24 +44,23 @@ sessiongraph 把这些都处理掉：逐帧解压、按事件类型抽可检索�
 | **斜杠命令** | `/sessiongraph status \| index \| search <词> \| workspaces` |
 | **命令结果回灌** | 敲完命令，结果作为 `plugin/notice` 消息注入会话 —— 模型下一轮就知道你查了什么（与 `/plan` 同一机制） |
 
-## 和 codegraph 的关系
+## 和记忆（memory）的分工
 
-两个插件互补，索引的是**不同东西**：
+记忆系统存的是**结论**，sessiongraph 存的是**证据**。两者索引的不是同一种东西：
 
-| | **codegraph** | **sessiongraph**（本插件） |
+| | 记忆（OpenViking / MEMORY.md 一类） | **sessiongraph** |
 |---|---|---|
-| 索引什么 | 代码结构：声明、调用、导入、影响面 | 会话历史：消息、工具调用、命令 |
-| 数据源 | 工作区源码文件 | `~/.dsh/sessions` 的 zstd JSONL |
-| 解析器 | tree-sitter（WASM） | 自研 JSONL 抽取 + bigram 分词 |
-| 作用域 | **单个项目**（`.codegraph/codegraph.db` 在项目内） | **全机跨工作区**（`~/.dsh/sessiongraph/index.db`） |
-| 回答的问题 | 「这个函数谁在调」「改这里会影响什么」 | 「上次在哪个会话说过/做过什么」 |
-| 更新时机 | `ctx.fs.watch` 监听文件变化 | `agent/created` + 查询前惰性增量 |
-| 中文 | 一张任务词同义词表（`zh-synonyms.ts`） | **bigram 分词**，两字词直接命中 |
-| 原生内核 | 无（tree-sitter WASM） | **Rust + napi-rs** |
+| 存什么 | 抽取后的事实：偏好、决策、实体、经验条目 | **原始记录**：每条消息、每次工具调用的名字与参数 |
+| 怎么产生 | 模型或服务端**摘要/抽取**，有损，会丢细节 | **原样保留**，只做截断，不做改写 |
+| 什么时候写 | 会话结束或到阈值后批量提交，可能要几十秒到几分钟 | 会话创建时增量、查询前惰性刷新，百毫秒级 |
+| 怎么查 | **语义检索**（embedding），按意思相近召回 | **全文索引**（bigram 分词），按字面命中 |
+| 存储 | `viking://` 下的 Markdown 条目 | 本地 SQLite（`~/.dsh/sessiongraph/index.db`） |
+| 能不能查原话 | ❌ 只有在被提炼成记忆时才留下痕迹 | ✅ 全部原文，包括当时的命令和参数 |
+| 适合问 | 「我喜欢什么」「上次定了什么方案」「这类问题怎么处理」 | 「哪次说过这句话」「当时那条命令怎么写的」「哪个会话讨论过 X」 |
 
-一句话分工：**codegraph 查代码怎么连，sessiongraph 查你上次说了什么。**
+一句话：**记忆回答「结论是什么」，sessiongraph 回答「当时到底说了什么」。**
 
-两者共用同一种架构：`service` 缝隙 + store/indexer provider 注册表 + 模型工具消费层。加一个新的 store 或 indexer，不需要动模型工具。
+两者不重复：一段对话很可能**永远不会进记忆**（短会话、闲聊、没触发阈值），但它一定在 sessiongraph 的原文索引里。反过来，记忆里的结论常常已经丢了上下文，需要原文来核对时只能回到 sessiongraph。
 
 ## 性能（Rust 内核）
 
@@ -130,7 +129,7 @@ SQLite 3.50.4 实测：
 做法：写入和查询用**同一个分词器**（`packages/service/src/tokenize.ts`）——
 
 - 中文连续段 → 重叠双字：`广告点击` → `广告` `告点` `点击`
-- 英文/数字段 → 小写整词，按 `_` 切分（`codegraph_index` → `codegraph` `index`）
+- 英文/数字段 → 小写整词，按 `_` 切分（`graph_index` → `graph` `index`）
 - 查询 token 双引号包裹 + `AND` 连接
 
 代价是召回优先而非短语精确匹配（`广告跳转` 可以匹配字符不相邻的条目）。查历史要的是「找得到」，这个取舍成立。

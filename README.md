@@ -44,24 +44,23 @@ Only the very first build is explicit (a few seconds with the Rust kernel); ever
 | **Slash command** | `/sessiongraph status` / `index` / `search <term>` / `workspaces` |
 | **Command results flow back** | After the command runs, its result is injected into the conversation as a `plugin/notice` message, so the model's next turn knows what you looked up (the same mechanism `/plan` uses) |
 
-## Relationship to codegraph
+## How it relates to memory
 
-Sibling plugins indexing **different things**:
+A memory system stores **conclusions**; sessiongraph stores **evidence**. They do not index the same thing:
 
-| | **codegraph** | **sessiongraph** (this plugin) |
+| | Memory (OpenViking / MEMORY.md and the like) | **sessiongraph** |
 |---|---|---|
-| Indexes | Code structure: declarations, calls, imports, impact | Conversation history: messages, tool calls, commands |
-| Data source | Workspace source files | zstd JSONL under `~/.dsh/sessions` |
-| Parser | tree-sitter (WASM) | Purpose-built JSONL extraction + bigram tokenizer |
-| Scope | **One project** (`.codegraph/codegraph.db` inside it) | **Machine-wide, across workspaces** (`~/.dsh/sessiongraph/index.db`) |
-| Answers | "Who calls this function", "what does this change reach" | "Where did I say or do this last time" |
-| Refresh | `ctx.fs.watch` on file changes | `agent/created` + lazy refresh before queries |
-| Chinese | A task-vocabulary synonym table (`zh-synonyms.ts`) | **Bigram tokenization** — two-character terms match |
-| Native kernel | none (tree-sitter WASM) | **Rust via napi-rs** |
+| Stores | Extracted facts: preferences, decisions, entities, lessons | **Raw records**: every message, every tool call with its arguments |
+| How it is produced | Summarized or extracted by a model, lossy, drops detail | **Kept verbatim**, only clipped, never rewritten |
+| When it is written | Batched at session end or past a threshold; tens of seconds to minutes | Incremental on session creation, lazily before queries; hundreds of milliseconds |
+| How you search | **Semantic** (embeddings), recalls by meaning | **Full-text** (bigram tokens), matches by characters |
+| Storage | Markdown entries under `viking://` | Local SQLite (`~/.dsh/sessiongraph/index.db`) |
+| Can it find the exact words | No — only what survived extraction | Yes — the whole thing, including the command and its arguments |
+| Good for | "What do I prefer", "what did we decide", "how do we usually handle this" | "When did I say this", "what was that command", "which session discussed X" |
 
-In one line: **codegraph tells you how the code connects; sessiongraph tells you what you said.**
+In one line: **memory answers "what is the conclusion"; sessiongraph answers "what was actually said".**
 
-Both share one architecture: a `service` seam, store/indexer provider registries, and a model-facing consumer layer. Adding a store or an indexer never touches the tools.
+They do not overlap: a conversation may **never enter memory** (short, casual, below any threshold) yet it is always in sessiongraph's raw index. Conversely, a memory entry has usually lost its context, and the only way to check it is to go back to the original in sessiongraph.
 
 ## Performance (Rust kernel)
 
@@ -130,7 +129,7 @@ Measured on SQLite 3.50.4 — does `广告` match `我今天在改广告SDK`?
 Write and read paths share **one tokenizer** (`packages/service/src/tokenize.ts`):
 
 - CJK runs → overlapping bigrams: `广告点击` → `广告` `告点` `点击`
-- Latin/digit runs → lowercased whole words, split on `_` (`codegraph_index` → `codegraph` `index`)
+- Latin/digit runs → lowercased whole words, split on `_` (`graph_index` → `graph` `index`)
 - Query tokens are double-quoted and joined with `AND`
 
 The trade-off is recall over phrase precision: `广告跳转` may match an entry where those characters are not adjacent. Searching your own history is a "find it" problem, not a "match this exact phrase" problem — so the trade is the right one.
