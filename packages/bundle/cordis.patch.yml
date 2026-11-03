@@ -1,0 +1,31 @@
+# The dsh-plugin-sessiongraph bundle patch: mounts the whole local-conversation-index
+# capability as ONE layer over an existing dsh profile.
+#
+# Row order carries no load semantics — activation is service-availability
+# driven — so the seam may appear before or after the providers that fill it.
+# The user's own profile patch layer can address any row below by `id` to
+# retune it (last write per row wins), e.g. pointing `sessionsRoot` at another
+# harness data directory or moving `indexRoot` off the default.
+
+- insert:
+    # Service Definition: publishes ctx.sessiongraph, the store/indexer provider
+    # registries, and the normalized query vocabulary. Carries no index of its own.
+    - id: sessiongraph
+      name: 'dsh-plugin-sessiongraph-service'
+
+    # Service Provider (read): serves the five operations from <indexRoot>/index.db.
+    # Claims a root only when that file already exists; `status` still answers for
+    # a root with no index so "never indexed" is distinguishable from "no match".
+    - id: sessiongraph-sqlite
+      name: 'dsh-plugin-sessiongraph-sqlite'
+
+    # Service Provider (write): scans ~/.dsh/sessions, decompresses each
+    # session.v*.jsonl.zstd, and writes that same index. Registers ONLY an
+    # indexer, never a store, so the seam's one-claimant-per-root rule stays intact.
+    - id: sessiongraph-sessions
+      name: 'dsh-plugin-sessiongraph-sessions'
+
+    # Consumer: the model-facing `sessiongraph` and `sessiongraph_index` tools plus
+    # their system-prompt section.
+    - id: sessiongraph-tool
+      name: 'dsh-plugin-sessiongraph-tool'

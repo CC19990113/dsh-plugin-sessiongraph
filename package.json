@@ -1,0 +1,35 @@
+{
+  "name": "dsh-plugin-sessiongraph-root",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./packages/bundle/cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "clean": "tsc -b --clean"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-invariants": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-system-prompt": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-timeout": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@types/node": "^22.10.0",
+    "@vitest/coverage-v8": "^4.1.8",
+    "typescript": "^5.9.0",
+    "vite-tsconfig-paths": "^5.1.4",
+    "vitest": "^4.1.8"
+  }
+}

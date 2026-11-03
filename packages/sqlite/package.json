@@ -1,0 +1,64 @@
+{
+  "name": "dsh-plugin-sessiongraph-sqlite",
+  "version": "0.1.0",
+  "description": "Read-only SQLite store for the DeepSeek Harness session-graph seam \u2014 answers search/session/timeline/workspaces/status from the on-disk index at <indexRoot>/index.db without ever writing to it",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "cordis-plugin",
+    "session",
+    "session-history",
+    "search",
+    "fts",
+    "bigram",
+    "sqlite",
+    "ai-agent"
+  ],
+  "license": "MIT",
+  "author": "CC ZHAO",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CC19990113/dsh-plugin-sessiongraph.git",
+    "directory": "packages/sqlite"
+  },
+  "homepage": "https://github.com/CC19990113/dsh-plugin-sessiongraph#readme",
+  "bugs": "https://github.com/CC19990113/dsh-plugin-sessiongraph/issues",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.d.ts"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "dsh-plugin-sessiongraph-service": "workspace:^"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1",
+    "@deepseek-ai/dsh-invariants": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.6"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-invariants": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "0.1.0-rc.6"
+  }
+}

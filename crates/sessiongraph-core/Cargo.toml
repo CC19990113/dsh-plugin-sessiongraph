@@ -1,0 +1,31 @@
+[package]
+name = "sessiongraph-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# napi module: a cdylib the Node loader `require`s. There is no bin target any more — the
+# prototype CLI became scan.rs/decode.rs/parse.rs, and a bin target would fail to link against
+# the Node `napi_*` symbols the cdylib resolves at load time.
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "3", features = ["napi8"] }
+napi-derive = "3"
+# `bundled` compiles the SQLite amalgamation into the module. FTS5 is verified at run time:
+# `write::verify_fts5` runs `CREATE VIRTUAL TABLE … USING fts5` against a temp table.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# `preserve_order` keeps tool-call argument JSON in its original key order, so a Rust-built
+# index stores the same entry text the TS indexer's `JSON.stringify` produces.
+serde_json = { version = "1", features = ["preserve_order"] }
+serde = { version = "1", features = ["derive"] }
+zstd = "0.13"
+rayon = "1"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

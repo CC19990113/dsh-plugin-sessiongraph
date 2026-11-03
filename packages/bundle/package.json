@@ -1,0 +1,38 @@
+{
+  "name": "dsh-plugin-sessiongraph-bundle",
+  "version": "0.1.0",
+  "description": "Bundle for dsh-plugin-sessiongraph \u2014 mounts the local conversation-index capability as one DSH profile layer",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "bundle",
+    "sessiongraph",
+    "session-history"
+  ],
+  "license": "MIT",
+  "author": "CC ZHAO",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CC19990113/dsh-plugin-sessiongraph.git",
+    "directory": "packages/bundle"
+  },
+  "homepage": "https://github.com/CC19990113/dsh-plugin-sessiongraph#readme",
+  "bugs": "https://github.com/CC19990113/dsh-plugin-sessiongraph/issues",
+  "type": "module",
+  "files": [
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "dependencies": {
+    "dsh-plugin-sessiongraph-service": "workspace:^",
+    "dsh-plugin-sessiongraph-sessions": "workspace:^",
+    "dsh-plugin-sessiongraph-sqlite": "workspace:^",
+    "dsh-plugin-sessiongraph-tool": "workspace:^"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // See packages/tool/tsconfig.json in the codegraph workspace for why this
+    // project clears the inherited source-to-source `paths` map before building:
+    // those entries point outside this project's rootDir, and the built `lib/`
+    // of `../service` (resolved through the workspace symlink) is what a
+    // declaration build must reference.
+    "paths": {},
+    "rootDir": "src",
+    "outDir": "lib"
+  },
+  "include": ["src"],
+  "references": [{ "path": "../service" }]
+}

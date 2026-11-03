@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The inherited `paths` map points at the service package's SOURCE, which
+    // would put files outside this project's rootDir. Clearing it makes the
+    // import resolve through the referenced project's built declaration file.
+    "paths": {},
+    "rootDir": "./src",
+    "outDir": "./lib",
+    "tsBuildInfoFile": "./lib/.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../service" }]
+}
