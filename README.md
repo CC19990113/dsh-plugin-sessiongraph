@@ -32,22 +32,29 @@ Both databases hold **identical content**, so this is not "a different index": `
 
 Engine selection is `engine: 'auto' | 'native' | 'typescript'`, defaulting to `auto`: use the native kernel when present, fall back silently otherwise — **a missing binary is never an error**.
 
-## How it relates to memory
+## How it relates to memory and to the built-in session search
 
-A memory system stores **conclusions**; sessiongraph stores **evidence**:
+The same question has three homes, and picking the wrong one means finding nothing:
 
-| | Memory (OpenViking / MEMORY.md and the like) | **sessiongraph** |
-|---|---|---|
-| Stores | Extracted facts: preferences, decisions, entities | **Raw records**: every message, every tool call with its arguments |
-| How it is produced | Summarized or extracted by a model — lossy, drops detail | **Kept verbatim**, only clipped, never rewritten |
-| When it is written | Batched at session end or past a threshold | Incremental on session creation, lazily before queries — hundreds of milliseconds |
-| How you search | Semantic (embeddings), recalls by meaning | Full-text (bigram tokens), matches by characters |
-| Can it find the exact words | No — only what survived extraction | Yes — including the command and its arguments |
-| Good for | "What do I prefer", "what did we decide" | "When did I say this", "what was that command" |
+| | Memory (OpenViking / MEMORY.md) | **Built-in DSH `session_search`** | **sessiongraph** |
+|---|---|---|---|
+| Stores | Extracted conclusions: preferences, decisions, entities | **Semantic text** projected from session events, per event type | **Raw entries**: message bodies, tool-call names and arguments |
+| Form | Markdown entries under `viking://` | SQLite FTS5 in an **in-memory** database (`openAt: first-search`, rebuilt every start) | SQLite **on disk**, maintained incrementally |
+| Scope | Machine-wide | **The caller's workspace** | Machine-wide, across workspaces |
+| Chinese | Semantic (embeddings), recalls by meaning | No — the `unicode61` tokenizer does **no CJK handling** at all: `我今天在改广告SDK` is one token, so `广告` matches nothing | Yes — purpose-built bigram tokenizer, **two-character terms match** |
+| How you search | By meaning | By token or phrase (English keywords, whole words) | By characters, full text (Chinese and English) |
+| Can it find the exact words | No — only what survived extraction | Partly: returns an excerpt | Yes — the whole thing, including commands and arguments |
+| Good for | "What do I prefer", "what did we decide" | English keywords, exact phrases, recent sessions | "When did I say this", "what was that command" |
 
-In one line: **memory answers "what is the conclusion"; sessiongraph answers "what was actually said".**
+In one line: **memory answers "what is the conclusion", the built-in search answers "which session mentioned it", sessiongraph answers "what was actually said".**
 
-They do not overlap: a conversation may **never enter memory** (short, casual, below any threshold) yet it is always in sessiongraph's raw index. Conversely, a memory entry has usually lost its context, and the only way to check it is to go back to the original.
+Three differences that matter in practice:
+
+- **Chinese**: the built-in search is effectively unusable for Chinese (its tokenizer has no CJK handling); sessiongraph is built for two-character Chinese terms
+- **Scope**: the built-in search only sees the caller's workspace; sessiongraph spans every workspace
+- **Persistence**: the built-in index lives in memory, opens on first search, and is gone after a restart; sessiongraph's index is on disk, usable immediately, kept fresh incrementally
+
+Memory does not overlap with either: a conversation may **never enter memory** (short, casual, below any threshold) yet it is always in sessiongraph's raw index. Conversely, a memory entry has usually lost its context, and checking it means going back to the original.
 
 ## Usage
 
