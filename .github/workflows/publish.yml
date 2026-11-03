@@ -9,10 +9,12 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      # Required for npm provenance: mints the OIDC token that lets npm attest
-      # this tarball was built from this repo at this commit. Without it the
-      # publish still succeeds, but silently drops the provenance badge.
-      id-token: write
+      # Deliberately NOT `id-token: write`. pnpm 11 tries OIDC trusted
+      # publishing whenever that permission is granted, the exchange fails on a
+      # package without a configured trusted publisher, and the fallback path
+      # ends up *staged* — the registry shows 0.0.0-stage and the real version
+      # never appears (0.1.0, 0.1.1 and 0.1.2 all hit this). With the permission
+      # absent pnpm goes straight to NODE_AUTH_TOKEN and publishes normally.
       contents: read
     steps:
       - uses: actions/checkout@v4
