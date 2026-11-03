@@ -23,7 +23,7 @@ import type {
   SessiongraphWorkspacesResult,
 } from 'dsh-plugin-sessiongraph-service'
 import { isBackgroundIndexReport } from 'dsh-plugin-sessiongraph-sessions'
-import { formatBytes, formatDuration, formatTime, clipText } from './render.ts'
+import { formatBytes, formatDuration, formatLiveSessions, formatTime, clipText } from './render.ts'
 import { SESSIONGRAPH_DEFAULT_LIMITS } from './schema.ts'
 
 /** Command name, without the leading slash. */
@@ -254,7 +254,9 @@ export function statusText(result: SessiongraphStatusResult, workspace?: string)
     `索引：${result.indexPath}`,
     `${result.sessions} 个会话 · ${result.entries} 条可检索条目 · ${result.workspaces} 个工作区 · ${formatBytes(result.bytes)}`,
     `最近一次建索引：${built}`,
-    '实时会话：未接入（索引器暂未提供 live 会话检索）',
+    // A store that predates live indexing omits the field; reporting zero is the honest reading,
+    // and the line stays so "no live sessions" is never confused with "not supported".
+    formatLiveSessions(result.liveSessions ?? 0),
   ]
   if (workspace !== undefined) lines.push(`当前工作区：${workspace}`)
   return lines.join('\n')

@@ -189,6 +189,9 @@ export const SESSIONGRAPH_OUTPUT_SCHEMA = {
       sessions: { type: 'integer', required: true },
       entries: { type: 'integer', required: true },
       workspaces: { type: 'integer', required: true },
+      // Always present: a store that cannot distinguish live sessions omits the seam field, and the
+      // tool answers `0` for it, which is what "nothing is running that this index covers" means.
+      live_sessions: { type: 'integer', required: true },
       indexed_at: { type: 'integer' },
       bytes: { type: 'integer', required: true },
     }),

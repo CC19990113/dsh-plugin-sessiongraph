@@ -226,6 +226,13 @@ export interface SessiongraphStatusResult {
   indexPath: string
   /** Sessions in the index. */
   sessions: number
+  /**
+   * Sessions whose source is the synthetic `live://<session-id>` marker rather than a log file:
+   * conversations that are still running and have not been written to disk yet. The count drops back
+   * to zero once each one ends and is re-indexed from its log. A store that cannot distinguish live
+   * sources omits the field; one that can always reports a number, `0` when every session is on disk.
+   */
+  liveSessions?: number
   /** Searchable entries in the index. */
   entries: number
   /** Distinct workspaces in the index. */

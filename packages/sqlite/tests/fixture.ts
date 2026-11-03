@@ -36,6 +36,8 @@ export interface SeedSession {
   origin?: string
   agentPreset?: string
   turns?: number
+  /** Source path to record; defaults to a real log path. Use `live://<id>` for a still-running session. */
+  sourcePath?: string
   entries: SeedEntry[]
 }
 
@@ -88,7 +90,7 @@ export function writeIndexAt(root: string, seed: SeedIndex): void {
       session.agentPreset ?? null,
       session.turns ?? 0,
       session.entries.length,
-      `/sessions/${session.id}/session.v4.jsonl.zstd`,
+      session.sourcePath ?? `/sessions/${session.id}/session.v4.jsonl.zstd`,
     )
     for (const entry of session.entries) {
       const inserted = insertEntry.run(

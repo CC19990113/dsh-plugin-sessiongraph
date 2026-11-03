@@ -271,6 +271,7 @@ describe('renderSessiongraph status', () => {
       sessions: 0,
       entries: 0,
       workspaces: 0,
+      live_sessions: 0,
       bytes: 0,
     }
     const text = renderSessiongraph({}, status, OPTIONS)
@@ -287,6 +288,7 @@ describe('renderSessiongraph status', () => {
       sessions: 491,
       entries: 12345,
       workspaces: 25,
+      live_sessions: 3,
       indexed_at: at(10, 3, 10, 40),
       bytes: 617 * 1024 ** 2,
     }
@@ -297,6 +299,21 @@ describe('renderSessiongraph status', () => {
     expect(text).toContain('25 个工作区')
     expect(text).toContain('617 MB')
     expect(text).toContain('2026-11-03 10:40')
+    expect(text).toContain('实时会话：3 个（当前还在跑、未落盘）')
+  })
+
+  it('says zero live sessions explicitly instead of dropping the line', () => {
+    const status: SessiongraphValueFor<'status'> = {
+      operation: 'status',
+      indexed: true,
+      index_path: '/Users/admin/.dsh/sessiongraph/index.db',
+      sessions: 491,
+      entries: 12345,
+      workspaces: 25,
+      live_sessions: 0,
+      bytes: 617 * 1024 ** 2,
+    }
+    expect(renderSessiongraph({}, status, OPTIONS)).toContain('实时会话：0（当前没有正在跑的会话）')
   })
 })
 

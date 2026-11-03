@@ -54,6 +54,14 @@ const SESSION_COLUMNS = [
 /** The one `entry` row shape every query below selects, so the projection never drifts by query. */
 const ENTRY_COLUMNS = 'seq, time, kind, turn, text, clipped'
 
+/**
+ * `source_path` prefix the indexer writes for a conversation that is still running, before its log
+ * exists on disk. Spelled out here instead of imported from the indexer package: a store depends only
+ * on the seam, and this is a value shared through the on-disk format, not through code. A session
+ * ends and is re-indexed from a real path, at which point its row no longer matches.
+ */
+const LIVE_SOURCE_LIKE = 'live://%'
+
 /** Run a statement and return its rows already typed as raw records. */
 function rows(db: DatabaseSync, sql: string, params: readonly unknown[] = []): IndexRow[] {
   return db.prepare(sql).all(...(params as never[]))
@@ -475,6 +483,7 @@ export function status(pool: IndexPool, indexRoot: string): SessiongraphStatusRe
       indexed: false,
       indexPath,
       sessions: 0,
+      liveSessions: 0,
       entries: 0,
       workspaces: 0,
       indexedAt: undefined,
@@ -490,6 +499,7 @@ export function status(pool: IndexPool, indexRoot: string): SessiongraphStatusRe
     indexed: true,
     indexPath,
     sessions: count(db, 'SELECT count(*) AS total FROM session'),
+    liveSessions: count(db, `SELECT count(*) AS total FROM session WHERE source_path LIKE '${LIVE_SOURCE_LIKE}'`),
     entries: count(db, 'SELECT count(*) AS total FROM entry'),
     workspaces: count(db, 'SELECT count(DISTINCT workspace) AS total FROM session'),
     // Epoch milliseconds fit a double, so a valid `indexed_at` never loses precision here; a missing

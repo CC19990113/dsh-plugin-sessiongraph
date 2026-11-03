@@ -1,0 +1,11 @@
+/Users/admin/www/dsh-plugin-sessiongraph/crates/sessiongraph-core/target/release/deps/napi_build-2c520f0b1c7e098a.d: /Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/lib.rs /Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/android.rs /Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/wasi.rs /Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/windows.rs /Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/wasi_heap_sync_exports.o
+
+/Users/admin/www/dsh-plugin-sessiongraph/crates/sessiongraph-core/target/release/deps/libnapi_build-2c520f0b1c7e098a.rlib: /Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/lib.rs /Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/android.rs /Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/wasi.rs /Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/windows.rs /Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/wasi_heap_sync_exports.o
+
+/Users/admin/www/dsh-plugin-sessiongraph/crates/sessiongraph-core/target/release/deps/libnapi_build-2c520f0b1c7e098a.rmeta: /Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/lib.rs /Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/android.rs /Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/wasi.rs /Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/windows.rs /Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/wasi_heap_sync_exports.o
+
+/Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/lib.rs:
+/Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/android.rs:
+/Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/wasi.rs:
+/Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/windows.rs:
+/Users/admin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/napi-build-2.6.0/src/wasi_heap_sync_exports.o:

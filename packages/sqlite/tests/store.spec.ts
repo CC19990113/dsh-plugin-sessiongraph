@@ -408,11 +408,40 @@ describe('status', () => {
       indexed: false,
       indexPath: databasePath(root),
       sessions: 0,
+      liveSessions: 0,
       entries: 0,
       workspaces: 0,
       indexedAt: undefined,
       bytes: 0,
     })
+  })
+
+  it('counts the sessions the indexer marked live:// as liveSessions', async () => {
+    const root = await project({
+      sessions: [
+        {
+          id: 'live0001-0000-4000-8000-000000000001',
+          workspace: WORKSPACE_ADX,
+          sourcePath: 'live://live0001-0000-4000-8000-000000000001',
+          entries: [{ seq: 1, time: 1_000, kind: 'user', text: '还在跑的会话甲' }],
+        },
+        {
+          id: 'live0002-0000-4000-8000-000000000002',
+          workspace: WORKSPACE_ADX,
+          sourcePath: 'live://live0002-0000-4000-8000-000000000002',
+          entries: [{ seq: 1, time: 2_000, kind: 'user', text: '还在跑的会话乙' }],
+        },
+        {
+          id: 'disk0001-0000-4000-8000-000000000003',
+          workspace: WORKSPACE_CG,
+          entries: [{ seq: 1, time: 3_000, kind: 'user', text: '已落盘的会话' }],
+        },
+      ],
+    })
+    const result = status(oneSlotPool(), root)
+    expect(result.indexed).toBe(true)
+    expect(result.sessions).toBe(3)
+    expect(result.liveSessions).toBe(2)
   })
 
   it('reports counts, the last run time, and the file size for a real index', async () => {
@@ -423,6 +452,8 @@ describe('status', () => {
     expect(result.sessions).toBe(5)
     expect(result.entries).toBe(9)
     expect(result.workspaces).toBe(3)
+    // The fixture's sessions all have a real log path, so none is live — the field is 0, not absent.
+    expect(result.liveSessions).toBe(0)
     expect(result.indexedAt).toBe(INDEXED_AT)
     expect(result.bytes).toBe(statSync(databasePath(root)).size)
     expect(result.bytes).toBeGreaterThan(0)

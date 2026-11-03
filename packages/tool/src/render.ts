@@ -81,6 +81,22 @@ export function formatDuration(ms: number): string {
 }
 
 /**
+ * Report how many of the indexed sessions are still running.
+ *
+ * Always rendered, even at zero: "no live sessions" and "this store cannot tell" are different
+ * states, and a reader who wanted to know whether the conversation they are in right now is
+ * searchable must be able to tell them apart. The caller supplies `0` for a store that omits the
+ * count, which is the honest reading of a store that predates live indexing.
+ * @param live - live sessions the index holds.
+ * @returns the one status line.
+ */
+export function formatLiveSessions(live: number): string {
+  return live === 0
+    ? '实时会话：0（当前没有正在跑的会话）'
+    : `实时会话：${live} 个（当前还在跑、未落盘）`
+}
+
+/**
  * Clip one blob of text to a character cap, marking the cut.
  * @param text - the text to bound.
  * @param maxChars - characters allowed, ellipsis included.
@@ -226,6 +242,7 @@ function renderValue(
       const indexedAt = value.indexed_at === undefined ? '未知' : formatTime(value.indexed_at)
       return `索引就绪（${value.index_path}）：${value.sessions} 个会话、${value.entries} 条可检索条目、`
         + `${value.workspaces} 个工作区、${formatBytes(value.bytes)}。最近一次建索引 ${indexedAt}。`
+        + `\n${formatLiveSessions(value.live_sessions)}`
     }
     case 'index': {
       // A delegated run has no report yet. Saying so, and naming the job that will carry it, is the

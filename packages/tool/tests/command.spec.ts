@@ -116,8 +116,11 @@ function report(): SessiongraphIndexReport {
   }
 }
 
-/** An indexed status answer. */
-function status(): SessiongraphStatusResult {
+/**
+ * An indexed status answer.
+ * @param liveSessions - live-session count; omitted to model a store that predates live indexing.
+ */
+function status(liveSessions?: number): SessiongraphStatusResult {
   return {
     operation: 'status',
     indexed: true,
@@ -125,6 +128,7 @@ function status(): SessiongraphStatusResult {
     sessions: 491,
     entries: 12345,
     workspaces: 25,
+    ...(liveSessions === undefined ? {} : { liveSessions }),
     indexedAt: new Date(2026, 10, 3, 10, 40).getTime(),
     bytes: 617 * 1024 ** 2,
   }
@@ -198,15 +202,25 @@ describe('runCommand', () => {
   })
 
   it('prints the index state, its freshness, and the live-session gap', async () => {
-    const result = await harness({ query: async () => status() }).invoke('status', '/Users/admin/www/dsh-community')
+    const result = await harness({ query: async () => status(3) }).invoke('status', '/Users/admin/www/dsh-community')
     expect(result.kind).toBe('success')
     expect(result.text).toContain('491 个会话')
     expect(result.text).toContain('12345 条可检索条目')
     expect(result.text).toContain('25 个工作区')
     expect(result.text).toContain('617 MB')
     expect(result.text).toContain('2026-11-03 10:40')
-    expect(result.text).toContain('实时会话：未接入')
+    expect(result.text).toContain('实时会话：3 个（当前还在跑、未落盘）')
     expect(result.text).toContain('当前工作区：/Users/admin/www/dsh-community')
+  })
+
+  it('says zero live sessions explicitly', async () => {
+    const result = await harness({ query: async () => status(0) }).invoke('status')
+    expect(result.text).toContain('实时会话：0（当前没有正在跑的会话）')
+  })
+
+  it('falls back to zero when the store predates live indexing', async () => {
+    const result = await harness({ query: async () => status() }).invoke('status')
+    expect(result.text).toContain('实时会话：0（当前没有正在跑的会话）')
   })
 
   it('turns "no index" into an answer with the command that fixes it', async () => {

@@ -108,7 +108,7 @@ function searchResult(): SessiongraphSearchResult {
  */
 function harness(
   index: () => Promise<unknown>,
-  options: { threshold?: number; indexRoot?: string } = {},
+  options: { threshold?: number; indexRoot?: string; liveSessions?: number } = {},
 ): Harness {
   const tools = new Map<string, RegisteredTool>()
   const calls: string[] = []
@@ -137,6 +137,7 @@ function harness(
               sessions: 1,
               entries: 1,
               workspaces: 1,
+              ...(options.liveSessions === undefined ? {} : { liveSessions: options.liveSessions }),
               indexedAt: Date.now(),
               bytes: 100,
             }
@@ -244,6 +245,19 @@ describe('lazy refresh through the registered tool', () => {
 
     expect(subject.calls).toEqual(['query:status'])
     expect(value).toMatchObject({ operation: 'status', indexed: true })
+    // The store omitted the live count; the tool answers zero and the render says so.
+    expect(value).toMatchObject({ live_sessions: 0 })
+    const text = tool(subject, 'sessiongraph').output.render({ operation: 'status' }, value)[0]?.text
+    expect(text).toContain('实时会话：0（当前没有正在跑的会话）')
+  })
+
+  it('carries the store\'s live-session count into the status answer', async () => {
+    const subject = harness(async () => report(), { liveSessions: 2 })
+    const value = await tool(subject, 'sessiongraph').execute({ operation: 'status' }, exec())
+
+    expect(value).toMatchObject({ live_sessions: 2 })
+    const text = tool(subject, 'sessiongraph').output.render({ operation: 'status' }, value)[0]?.text
+    expect(text).toContain('实时会话：2 个（当前还在跑、未落盘）')
   })
 
   it('lets the manual index tool run on a fresh index, because the model asked for it', async () => {

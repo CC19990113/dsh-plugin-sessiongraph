@@ -82,7 +82,15 @@ export {
   type SessiongraphToolValue,
   type SessiongraphValueFor,
 } from './schema.ts'
-export { clipText, formatBytes, formatDuration, formatTime, renderSessiongraph, STALE_NOTE } from './render.ts'
+export {
+  clipText,
+  formatBytes,
+  formatDuration,
+  formatLiveSessions,
+  formatTime,
+  renderSessiongraph,
+  STALE_NOTE,
+} from './render.ts'
 export type { RenderOptions } from './render.ts'
 export { LazyIndexRefresher } from './refresh.ts'
 export type { LazyRefreshDeps, RefreshOutcome, SynchronousIndexOptions } from './refresh.ts'
@@ -149,6 +157,7 @@ export const SESSIONGRAPH_PROMPT_TEXT =
   + 'sessiongraph 从预建索引回答：search 跨会话全文检索（中文按双字切分，两字词即可命中，如「广告」）、'
   + 'session 按 id 或唯一前缀打开一个会话、timeline 按时间列会话、workspaces 列工作区统计。'
   + '索引超过几分钟没更新时，查询前会自动跑一次增量刷新（很快，失败也照常回答，只是结果可能少几条）。'
+  + '索引包含正在进行的会话，所以刚才说的话通常也能查到（取决于上次刷新时间）。'
   + '索引不存在时 status 仍能回答，其它操作会失败；要强制全量重建用 sessiongraph_index，它有独立的更长预算（日志很多时它会转成后台 job 并返回 jobId，用 job_output 取报告）。'
 
 /** Plugin configuration: the defaults and caps the seam requires the consumer to own. */
@@ -460,6 +469,7 @@ async function statusValue(ctx: Context, indexRoot: string, signal: AbortSignal)
         sessions: 0,
         entries: 0,
         workspaces: 0,
+        live_sessions: 0,
         bytes: 0,
       }
     }
@@ -660,6 +670,7 @@ function projectStatus(result: SessiongraphStatusResult): SessiongraphValueFor<'
     sessions: result.sessions,
     entries: result.entries,
     workspaces: result.workspaces,
+    live_sessions: result.liveSessions ?? 0,
     ...(result.indexedAt === undefined ? {} : { indexed_at: result.indexedAt }),
     bytes: result.bytes,
   }
