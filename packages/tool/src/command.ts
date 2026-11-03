@@ -15,6 +15,8 @@
 
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { INDEX_RELATIVE_PATH, SessiongraphError } from 'dsh-plugin-sessiongraph-service'
 import type {
   SessiongraphIndexReport,
@@ -71,6 +73,11 @@ export interface CommandInvocation {
   readonly agent?: {
     readonly id?: string
     readonly session?: { readonly header?: { readonly cwd?: unknown } }
+    /**
+     * Hand one message to this session's model-facing context. Absent on compositions with no agent
+     * loop (an ACP transport, an older host), which is why every use is optional and contained.
+     */
+    readonly inject?: (message: UserMessage) => void
   }
   /** UI request cancellation, forwarded to every seam call. */
   readonly signal?: AbortSignal
@@ -193,21 +200,119 @@ export async function runCommand(
 ): Promise<CommandResult> {
   const plan = parseCommand(invocation.rawInput)
   try {
-    switch (plan.kind) {
-      case 'status':
-        return await statusCommand(ctx, options, invocation)
-      case 'workspaces':
-        return await workspacesCommand(ctx, options, invocation)
-      case 'index':
-        return await indexCommand(ctx, options, plan.force, invocation)
-      case 'search':
-        return await searchCommand(ctx, options, plan.query, invocation)
-      case 'unknown':
-        return { kind: 'error', text: `未知的子命令 "${plan.subcommand}"。${COMMAND_USAGE}\n${AVAILABLE}` }
-    }
+    const result = await dispatch(ctx, options, plan, invocation)
+    // Only a successful lookup is worth telling the model about: a typo or a failed call is the
+    // human's problem, and injecting it would spend context on something the model cannot use.
+    if (result.kind === 'success') injectCommandNotice(invocation, plan, result.text ?? '')
+    return result
   } catch (error) {
     return { kind: 'error', text: describe(error) }
   }
+}
+
+/**
+ * Run one parsed command against the seam.
+ * @param ctx - the plugin context carrying `sessiongraph`.
+ * @param options - the index root and rendering caps.
+ * @param plan - the parsed subcommand.
+ * @param invocation - the accepted command line and its context.
+ * @returns the settled result the UI renders.
+ */
+async function dispatch(
+  ctx: Context,
+  options: CommandOptions,
+  plan: CommandPlan,
+  invocation: CommandInvocation,
+): Promise<CommandResult> {
+  switch (plan.kind) {
+    case 'status':
+      return statusCommand(ctx, options, invocation)
+    case 'workspaces':
+      return workspacesCommand(ctx, options, invocation)
+    case 'index':
+      return indexCommand(ctx, options, plan.force, invocation)
+    case 'search':
+      return searchCommand(ctx, options, plan.query, invocation)
+    case 'unknown':
+      return { kind: 'error', text: `未知的子命令 "${plan.subcommand}"。${COMMAND_USAGE}\n${AVAILABLE}` }
+  }
+}
+
+/** Producer identity an injected notice declares; the session log can attribute it to this plugin. */
+export const INJECTED_NOTICE_PLUGIN = 'dsh-plugin-sessiongraph'
+
+/**
+ * Tell the model that a person just ran this command, and what came back.
+ *
+ * A command's output goes to the UI, not the model — so without this the model would see the next
+ * human turn as if the lookup never happened, and re-run the same search. The injected message is a
+ * `plugin`-sourced `notice`, never a `user` message: it must not read as something the human typed.
+ *
+ * Entirely contained. The command has already succeeded and its text already reached the person; a
+ * composition without an agent loop (or one whose transport rejects this source) loses only the
+ * model-side copy, and that must never turn a successful command into an error.
+ * @param invocation - the accepted command line and its context.
+ * @param plan - the parsed subcommand that ran.
+ * @param text - the result text the person saw.
+ */
+function injectCommandNotice(invocation: CommandInvocation, plan: CommandPlan, text: string): void {
+  const agent = invocation.agent
+  if (agent?.inject === undefined) return
+  try {
+    const line = noticeCommandLine(plan)
+    agent.inject(createUserMessage({
+      content: [{ type: 'text', text: noticeBody(plan, text) }],
+      source: {
+        kind: 'plugin',
+        plugin: INJECTED_NOTICE_PLUGIN,
+        form: 'notice',
+        // The host bounds a notice summary at CONTEXT_SUMMARY_MAX_CHARS (120); its helper is the one
+        // place that bound lives, so this module never invents a truncation of its own.
+        summary: boundContextSummary(`用户执行了 ${line}`),
+      },
+    }))
+  } catch (error) {
+    // The command result already reached the person; the model just does not learn about it.
+    console.error(
+      `sessiongraph: could not inject the /${COMMAND_NAME} ${plan.kind} result into the session: ${describe(error)}`,
+    )
+  }
+}
+
+/**
+ * The command line as a person typed it, for the injected message's first line and summary.
+ * @param plan - the parsed subcommand.
+ * @returns the rendered command line, including `--force` and the search text when they were given.
+ */
+function noticeCommandLine(plan: CommandPlan): string {
+  switch (plan.kind) {
+    case 'status':
+      return `/${COMMAND_NAME} status`
+    case 'workspaces':
+      return `/${COMMAND_NAME} workspaces`
+    case 'index':
+      return `/${COMMAND_NAME} index${plan.force ? ' --force' : ''}`
+    case 'search':
+      return `/${COMMAND_NAME} search${plan.query === '' ? '' : ` ${plan.query}`}`
+    case 'unknown':
+      return `/${COMMAND_NAME} ${plan.subcommand}`
+  }
+}
+
+/**
+ * The model-facing body of one notice: what the person asked, and the result they saw.
+ *
+ * The result text is the same compact rendering the person got — never a raw dump — and a search
+ * carries one closing hint so the model knows it may keep looking through its own tool.
+ * @param plan - the parsed subcommand that ran.
+ * @param text - the result text the person saw.
+ * @returns the message body.
+ */
+function noticeBody(plan: CommandPlan, text: string): string {
+  const line = noticeCommandLine(plan)
+  if (plan.kind !== 'search') return `用户刚执行了 ${line}。\n\n${text}`
+  return `用户刚执行了 ${line}，结果见下面（最多前 10 条）。\n\n${text}\n\n`
+    + '如果这些结果不足以回答，可以自己调用 sessiongraph 工具继续检索（search / timeline / session 都可以）。'
 }
 
 /** The session workspace an invocation runs for; `undefined` when the command has none. */

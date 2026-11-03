@@ -5,6 +5,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessiongraphError } from 'dsh-plugin-sessiongraph-service'
 import type {
   SessiongraphIndexReport,
@@ -12,7 +13,7 @@ import type {
   SessiongraphStatusResult,
   SessiongraphWorkspacesResult,
 } from 'dsh-plugin-sessiongraph-service'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   COMMAND_INPUT_HINT,
   COMMAND_NAME,
@@ -27,10 +28,15 @@ import type { CommandDefinition, CommandInvocation } from '../src/command.ts'
 /** The index root every fixture assumes. */
 const INDEX_ROOT = '/tmp/sessiongraph-command'
 
+/** How the receiving agent's `inject` behaves in one invocation. */
+type InjectionMode = 'record' | 'throwing' | 'missing' | 'no-agent'
+
 /** One registered definition plus the invoker that reaches its handler. */
 interface CommandHarness {
   readonly definitions: CommandDefinition[]
-  invoke(rawInput: string, workspace?: string): Promise<{ kind: string; text?: string }>
+  /** Every message the command injected into the session. */
+  readonly injected: UserMessage[]
+  invoke(rawInput: string, workspace?: string, injection?: InjectionMode): Promise<{ kind: string; text?: string }>
 }
 
 /** A snapshot of the seam calls a subcommand made. */
@@ -81,21 +87,47 @@ function harness(service: {
   registerCommands(ctx as unknown as Context, { indexRoot: INDEX_ROOT, maxSnippetChars: 600 })
   const definition = definitions[0]
   if (definition === undefined) throw new Error('the command was not registered')
+  const injected: UserMessage[] = []
   return {
     definitions,
+    injected,
     calls,
-    async invoke(rawInput, workspace) {
+    async invoke(rawInput, workspace, injection = 'record') {
+      const session = { header: { ...(workspace === undefined ? {} : { cwd: workspace }) } }
+      const agent = injection === 'no-agent'
+        ? undefined
+        : {
+            id: 'session-1',
+            session,
+            ...(injection === 'missing'
+              ? {}
+              : {
+                  inject(message: UserMessage) {
+                    if (injection === 'throwing') throw new Error('injection refused')
+                    injected.push(message)
+                  },
+                }),
+          }
       const invocation: CommandInvocation = {
         rawInput,
         signal: new AbortController().signal,
-        agent: {
-          id: 'session-1',
-          session: { header: { ...(workspace === undefined ? {} : { cwd: workspace }) } },
-        },
+        ...(agent === undefined ? {} : { agent }),
       }
       return definition.handler(invocation)
     },
   }
+}
+
+/** The one text block of an injected message. */
+function messageText(message: UserMessage): string {
+  return message.content.map(block => (block.type === 'text' ? block.text : '')).join('')
+}
+
+/** The bounded one-line account of an injected notice. */
+function noticeSummary(message: UserMessage): string {
+  const source = message.source
+  if (source.kind !== 'plugin' || source.form !== 'notice') throw new Error('not a plugin notice')
+  return source.summary
 }
 
 /** A finished index report. */
@@ -153,6 +185,10 @@ function search(hits: number): SessiongraphSearchResult {
     truncated: false,
   }
 }
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 describe('parseCommand', () => {
   it('treats an empty line as status', () => {
@@ -357,5 +393,126 @@ describe('runCommand', () => {
     }, { rawInput: 'search 广告', signal: new AbortController().signal })
     expect(result.kind).toBe('success')
     expect(result.text).toContain('命中「广告」')
+  })
+})
+
+describe('model-facing injection', () => {
+  it('tells the model what a successful search found', async () => {
+    const subject = harness({ query: async () => search(2) })
+    const result = await subject.invoke('search 广告')
+
+    expect(result.kind).toBe('success')
+    expect(subject.injected).toHaveLength(1)
+    const message = subject.injected[0]
+    if (message === undefined) throw new Error('no message was injected')
+    expect(message.role).toBe('user')
+    expect(message.source).toMatchObject({
+      kind: 'plugin',
+      plugin: 'dsh-plugin-sessiongraph',
+      form: 'notice',
+    })
+    const summary = noticeSummary(message)
+    expect(summary).toContain('/sessiongraph search 广告')
+    expect(summary.length).toBeLessThanOrEqual(120)
+    const text = messageText(message)
+    expect(text).toContain('用户刚执行了 /sessiongraph search 广告')
+    expect(text).toContain('《改广告 SDK》')
+    expect(text).toContain('我今天在改[广告]SDK')
+    expect(text).toContain('可以自己调用 sessiongraph 工具继续检索')
+  })
+
+  it('tells the model what a successful status showed', async () => {
+    const subject = harness({ query: async () => status(2) })
+    await subject.invoke('status')
+
+    const message = subject.injected[0]
+    if (message === undefined) throw new Error('no message was injected')
+    const text = messageText(message)
+    expect(text).toContain('用户刚执行了 /sessiongraph status')
+    expect(text).toContain('491 个会话')
+    expect(text).toContain('实时会话：2 个')
+    expect(noticeSummary(message)).toContain('/sessiongraph status')
+  })
+
+  it('tells the model what a successful index run did, including --force', async () => {
+    const subject = harness({ index: async () => report() })
+    await subject.invoke('index --force')
+
+    const message = subject.injected[0]
+    if (message === undefined) throw new Error('no message was injected')
+    const text = messageText(message)
+    expect(text).toContain('用户刚执行了 /sessiongraph index --force')
+    expect(text).toContain('建索引完成')
+    expect(text).not.toContain('--force --force')
+  })
+
+  it('tells the model the workspace list', async () => {
+    const workspaces: SessiongraphWorkspacesResult = {
+      operation: 'workspaces',
+      workspaces: [{
+        workspace: '/Users/admin/www/dsh-community',
+        sessions: 12,
+        entries: 340,
+        firstAt: new Date(2026, 9, 1, 9, 0).getTime(),
+        lastAt: new Date(2026, 10, 3, 10, 37).getTime(),
+      }],
+      total: 1,
+    }
+    const subject = harness({ query: async () => workspaces })
+    await subject.invoke('workspaces')
+
+    const message = subject.injected[0]
+    if (message === undefined) throw new Error('no message was injected')
+    const text = messageText(message)
+    expect(text).toContain('用户刚执行了 /sessiongraph workspaces')
+    expect(text).toContain('/Users/admin/www/dsh-community')
+    expect(text).toContain('12 会话')
+  })
+
+  it('never injects a failed or unknown subcommand', async () => {
+    const unknown = harness({})
+    expect((await unknown.invoke('purge')).kind).toBe('error')
+    expect(unknown.injected).toHaveLength(0)
+
+    const missingQuery = harness({})
+    expect((await missingQuery.invoke('search')).kind).toBe('error')
+    expect(missingQuery.injected).toHaveLength(0)
+
+    const failed = harness({
+      query: async () => {
+        throw new Error('store exploded')
+      },
+    })
+    expect((await failed.invoke('status')).kind).toBe('error')
+    expect(failed.injected).toHaveLength(0)
+  })
+
+  it('returns the successful result when the invocation has no agent at all', async () => {
+    const subject = harness({ query: async () => status() })
+    const result = await subject.invoke('status', undefined, 'no-agent')
+
+    expect(result.kind).toBe('success')
+    expect(result.text).toContain('491 个会话')
+    expect(subject.injected).toHaveLength(0)
+  })
+
+  it('returns the successful result when the agent has no inject method', async () => {
+    const subject = harness({ query: async () => status() })
+    const result = await subject.invoke('status', undefined, 'missing')
+
+    expect(result.kind).toBe('success')
+    expect(subject.injected).toHaveLength(0)
+  })
+
+  it('returns the successful result when injection itself throws, logging once', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const subject = harness({ query: async () => status() })
+    const result = await subject.invoke('status', undefined, 'throwing')
+
+    expect(result.kind).toBe('success')
+    expect(result.text).toContain('491 个会话')
+    expect(subject.injected).toHaveLength(0)
+    expect(logged).toHaveBeenCalledTimes(1)
+    expect(String(logged.mock.calls[0]?.[0])).toContain('could not inject')
   })
 })

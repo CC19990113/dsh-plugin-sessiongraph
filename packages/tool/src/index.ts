@@ -101,6 +101,7 @@ export {
   COMMAND_INPUT_HINT,
   COMMAND_NAME,
   COMMAND_USAGE,
+  INJECTED_NOTICE_PLUGIN,
   indexReportText,
   invocationWorkspace,
   parseCommand,
