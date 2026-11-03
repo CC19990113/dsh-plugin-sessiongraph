@@ -10,3 +10,6 @@ packages/bundle/README.md
 
 # 本地工作笔记(含本机绝对路径,不公开)
 NOTES.local.md
+
+# Rust 构建产物（体积大、每次编译都变）
+crates/*/target/

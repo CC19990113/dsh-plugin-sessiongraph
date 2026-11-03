@@ -86,6 +86,15 @@ pub struct IndexReport {
     pub skipped: u32,
     /// Sessions dropped because their source file disappeared.
     pub removed: u32,
+    /// Live (still-running) sessions rebuilt from the host's in-memory view this run.
+    ///
+    /// Always 0 from this kernel: live sessions come from the host's `sessionQuery`, which the
+    /// caller's live pass owns. The field exists so the shape matches `SessiongraphIndexReport`,
+    /// and so a consumer merging this report with the caller's live pass gets a number, not
+    /// `undefined`.
+    pub live_sessions: u32,
+    /// Live sessions left out by the caller's cap. Always 0 here, for the same reason.
+    pub live_skipped: u32,
     /// Sessions discovered in total across all source roots.
     pub discovered: u32,
     /// Sessions that failed to parse, with a bounded reason.
@@ -244,10 +253,12 @@ fn run_index(options: IndexOptions) -> Result<IndexReport, String> {
             // must contribute one session row: the newer source wins and the stale one is reported
             // as skipped rather than written and immediately deleted.
             Some(index) => {
-                if file.mtime > candidates[index].file.mtime {
+                if file.mtime > candidates[index].mtime {
                     candidates[index] = write::IndexedSession {
                         session,
-                        file: (*file).clone(),
+                        source_path: file.file_path.to_string_lossy().into_owned(),
+                        mtime: file.mtime,
+                        size: file.size,
                     };
                 }
                 skipped += 1;
@@ -256,7 +267,9 @@ fn run_index(options: IndexOptions) -> Result<IndexReport, String> {
                 by_id.insert(session.id.clone(), candidates.len());
                 candidates.push(write::IndexedSession {
                     session,
-                    file: (*file).clone(),
+                    source_path: file.file_path.to_string_lossy().into_owned(),
+                    mtime: file.mtime,
+                    size: file.size,
                 });
             }
         }
@@ -265,8 +278,7 @@ fn run_index(options: IndexOptions) -> Result<IndexReport, String> {
     let mut added = 0u32;
     let mut updated = 0u32;
     for candidate in &candidates {
-        let source_path = candidate.file.file_path.to_string_lossy();
-        if previous.as_ref().is_some_and(|rows| rows.contains_key(source_path.as_ref())) {
+        if previous.as_ref().is_some_and(|rows| rows.contains_key(&candidate.source_path)) {
             updated += 1;
         } else {
             added += 1;
@@ -278,6 +290,11 @@ fn run_index(options: IndexOptions) -> Result<IndexReport, String> {
     let mut removed: Vec<String> = Vec::new();
     if let Some(rows) = previous.as_ref() {
         for (source_path, row) in rows {
+            // Live rows carry a synthetic source path and are rebuilt by the caller's live pass
+            // every run; a file scan saying nothing about them must not delete them.
+            if write::is_live_source(source_path) {
+                continue;
+            }
             if seen.contains(source_path) {
                 continue;
             }
@@ -306,6 +323,8 @@ fn run_index(options: IndexOptions) -> Result<IndexReport, String> {
         updated,
         skipped,
         removed: u32::try_from(removed.len()).unwrap_or(u32::MAX),
+        live_sessions: 0,
+        live_skipped: 0,
         discovered: u32::try_from(files.len()).unwrap_or(u32::MAX),
         failed,
         entries: u32::try_from(summary.entries).unwrap_or(u32::MAX),

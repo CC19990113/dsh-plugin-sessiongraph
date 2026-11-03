@@ -27,7 +27,6 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::json;
 
 use crate::parse::ParsedSession;
-use crate::scan::SessionFile;
 use crate::tokenize;
 
 /// Current on-disk schema version, matching `SCHEMA_VERSION` in the seam package.
@@ -35,6 +34,18 @@ pub const SCHEMA_VERSION: i64 = 1;
 
 /// Relative path of the index file inside an index root.
 pub const INDEX_RELATIVE_PATH: &str = "index.db";
+
+/// Prefix of the synthetic source path a live (still-running) session is recorded under.
+///
+/// A live row belongs to no file: the caller's live pass rebuilds it from the host's in-memory log
+/// on every run, with `source_mtime = 0` and `source_size = 0`. A file scan saying nothing about it
+/// is not evidence that its session disappeared, so the removal pass must skip these rows.
+pub const LIVE_SOURCE_PREFIX: &str = "live://";
+
+/// Whether a recorded source path is the synthetic marker of a live session.
+pub fn is_live_source(source_path: &str) -> bool {
+    source_path.starts_with(LIVE_SOURCE_PREFIX)
+}
 
 /// Sidecar summary the prompt-assembly path reads without opening SQLite.
 pub const STATUS_RELATIVE_PATH: &str = "status.json";
@@ -107,10 +118,15 @@ pub struct ExistingSession {
 /// Previous index rows keyed by source path.
 pub type ExistingIndex = HashMap<String, ExistingSession>;
 
-/// One parsed session paired with the file it came from.
+/// One parsed session paired with the source it came from.
 pub struct IndexedSession {
     pub session: ParsedSession,
-    pub file: SessionFile,
+    /// Absolute log path, or the synthetic `live://<id>` marker of a live session.
+    pub source_path: String,
+    /// Source mtime in epoch milliseconds, or 0 for a live session (there is no version to compare).
+    pub mtime: i64,
+    /// Source size in bytes, or 0 for a live session.
+    pub size: i64,
 }
 
 /// One index write, already scoped by the caller.
@@ -345,7 +361,7 @@ fn apply_plan(connection: &Connection, plan: &WritePlan<'_>, preserve: bool) -> 
         .map_err(database_error)?;
 
     for item in plan.sessions {
-        let source_path = item.file.file_path.to_string_lossy().into_owned();
+        let source_path = item.source_path.clone();
         // Keyed by id AND source path: a session whose id changed between runs must not leave its
         // old row behind, and the source path is the stable half of the pair.
         remove_fts_for_source
@@ -371,8 +387,8 @@ fn apply_plan(connection: &Connection, plan: &WritePlan<'_>, preserve: bool) -> 
                 item.session.turns,
                 item.session.entries.len() as i64,
                 source_path,
-                item.file.mtime,
-                item.file.size,
+                item.mtime,
+                item.size,
             ])
             .map_err(database_error)?;
 

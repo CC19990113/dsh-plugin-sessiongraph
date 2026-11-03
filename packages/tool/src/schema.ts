@@ -213,6 +213,9 @@ export const SESSIONGRAPH_OUTPUT_SCHEMA = {
       removed: { type: 'integer', required: true },
       discovered: { type: 'integer', required: true },
       failed: { type: 'array', required: true, items: FAILED_SESSION },
+      // Always present and normalized to 0 by the tool; the renderer omits the line at 0 so a routine
+      // incremental run does not print "replayed 0 live sessions" every time.
+      live_sessions: { type: 'integer', required: true },
       entries: { type: 'integer', required: true },
       sessions: { type: 'integer', required: true },
       workspaces: { type: 'integer', required: true },

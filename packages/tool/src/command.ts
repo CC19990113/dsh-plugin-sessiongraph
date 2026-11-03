@@ -23,7 +23,7 @@ import type {
   SessiongraphWorkspacesResult,
 } from 'dsh-plugin-sessiongraph-service'
 import { isBackgroundIndexReport } from 'dsh-plugin-sessiongraph-sessions'
-import { formatBytes, formatDuration, formatLiveSessions, formatTime, clipText } from './render.ts'
+import { formatBytes, formatDuration, formatLiveReplay, formatLiveSessions, formatTime, clipText } from './render.ts'
 import { SESSIONGRAPH_DEFAULT_LIMITS } from './schema.ts'
 
 /** Command name, without the leading slash. */
@@ -318,6 +318,8 @@ export function indexReportText(report: SessiongraphIndexReport): string {
       + `（发现 ${report.discovered} 个会话）。`,
     `${report.sessions} 个会话 · ${report.entries} 条可检索条目 · ${report.workspaces} 个工作区 · ${formatBytes(report.bytes)}`,
   ]
+  const replayed = formatLiveReplay(report.liveSessions ?? 0)
+  if (replayed !== '') lines.push(replayed)
   if (report.failed.length > 0) lines.push(`解析失败 ${report.failed.length} 个会话。`)
   return lines.join('\n')
 }

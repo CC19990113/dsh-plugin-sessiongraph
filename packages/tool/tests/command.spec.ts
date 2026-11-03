@@ -283,6 +283,14 @@ describe('runCommand', () => {
     expect(subject.calls.indexes[0]).not.toHaveProperty('workspace')
   })
 
+  it('mentions replayed live sessions, and stays quiet when there were none', async () => {
+    const replaying = await harness({ index: async () => ({ ...report(), liveSessions: 2 }) }).invoke('index')
+    expect(replaying.text).toContain('本次重放 2 个实时会话')
+
+    const quiet = await harness({ index: async () => report() }).invoke('index')
+    expect(quiet.text).not.toContain('本次重放')
+  })
+
   it('prints the job id when a large manual index is delegated', async () => {
     const result = await harness({ index: async () => ({ ...report(), jobId: 'job-9' }) }).invoke('index')
     expect(result.kind).toBe('success')

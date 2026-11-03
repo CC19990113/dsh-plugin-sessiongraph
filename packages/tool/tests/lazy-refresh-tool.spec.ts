@@ -284,11 +284,21 @@ describe('lazy refresh through the registered tool', () => {
     const subject = harness(async () => report())
     const value = await tool(subject, 'sessiongraph_index').execute({}, exec('session-1'))
 
-    expect(value).toMatchObject({ operation: 'index', added: 0, skipped: 1 })
+    expect(value).toMatchObject({ operation: 'index', added: 0, skipped: 1, live_sessions: 0 })
     expect('status' in (value as object)).toBe(false)
     const text = tool(subject, 'sessiongraph_index').output.render({}, value)[0]?.text
     expect(text).toContain('建索引完成')
     expect(text).not.toContain('已在后台建索引')
+    expect(text).not.toContain('本次重放')
+  })
+
+  it('mentions the live sessions a completed run replayed', async () => {
+    const subject = harness(async () => ({ ...report(), liveSessions: 2 }))
+    const value = await tool(subject, 'sessiongraph_index').execute({}, exec('session-1'))
+
+    expect(value).toMatchObject({ live_sessions: 2 })
+    const text = tool(subject, 'sessiongraph_index').output.render({}, value)[0]?.text
+    expect(text).toContain('本次重放 2 个实时会话')
   })
 
   it('sends no owner when the call has no owning agent, so the indexer falls back to running in place', async () => {

@@ -86,6 +86,7 @@ export {
   clipText,
   formatBytes,
   formatDuration,
+  formatLiveReplay,
   formatLiveSessions,
   formatTime,
   renderSessiongraph,
@@ -157,7 +158,7 @@ export const SESSIONGRAPH_PROMPT_TEXT =
   + 'sessiongraph 从预建索引回答：search 跨会话全文检索（中文按双字切分，两字词即可命中，如「广告」）、'
   + 'session 按 id 或唯一前缀打开一个会话、timeline 按时间列会话、workspaces 列工作区统计。'
   + '索引超过几分钟没更新时，查询前会自动跑一次增量刷新（很快，失败也照常回答，只是结果可能少几条）。'
-  + '索引包含正在进行的会话，所以刚才说的话通常也能查到（取决于上次刷新时间）。'
+  + '索引包含正在进行的会话，所以刚才说的话通常也能查到（取决于上次刷新时间）；status 里的实时会话数会随会话启停变化，不是索引坏了。'
   + '索引不存在时 status 仍能回答，其它操作会失败；要强制全量重建用 sessiongraph_index，它有独立的更长预算（日志很多时它会转成后台 job 并返回 jobId，用 job_output 取报告）。'
 
 /** Plugin configuration: the defaults and caps the seam requires the consumer to own. */
@@ -711,6 +712,7 @@ function projectIndexReport(report: SessiongraphIndexReport): SessiongraphValueF
     removed: report.removed,
     discovered: report.discovered,
     failed: report.failed.map(entry => ({ path: entry.path, reason: entry.reason })),
+    live_sessions: report.liveSessions ?? 0,
     entries: report.entries,
     sessions: report.sessions,
     workspaces: report.workspaces,

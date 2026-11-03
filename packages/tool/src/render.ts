@@ -97,6 +97,18 @@ export function formatLiveSessions(live: number): string {
 }
 
 /**
+ * One line a finished index run adds when it replayed sessions that are still running.
+ *
+ * Omitted at zero on purpose: an empty run is the normal case, and a line that almost always says
+ * "replayed 0 live sessions" trains a reader to skip the block it sits in.
+ * @param live - live sessions replayed by the run.
+ * @returns the sentence, or an empty string when there were none.
+ */
+export function formatLiveReplay(live: number): string {
+  return live === 0 ? '' : `本次重放 ${live} 个实时会话。`
+}
+
+/**
  * Clip one blob of text to a character cap, marking the cut.
  * @param text - the text to bound.
  * @param maxChars - characters allowed, ellipsis included.
@@ -256,12 +268,14 @@ function renderValue(
         ? '没有会话解析失败。'
         : `解析失败 ${value.failed.length} 个：`
           + value.failed.map(entry => `\n  ${entry.path} — ${entry.reason}`).join('')
+      const replayed = formatLiveReplay(value.live_sessions)
       return [
         `建索引完成，用时 ${formatDuration(value.elapsed_ms)}：`
           + `新增 ${value.added}、更新 ${value.updated}、跳过 ${value.skipped}、移除 ${value.removed}`
           + `（共发现 ${value.discovered} 个会话）。`,
         `${value.index_path}：${value.sessions} 个会话、${value.entries} 条可检索条目、`
           + `${value.workspaces} 个工作区、${formatBytes(value.bytes)}。`,
+        ...(replayed === '' ? [] : [replayed]),
         failed,
       ].join('\n')
     }

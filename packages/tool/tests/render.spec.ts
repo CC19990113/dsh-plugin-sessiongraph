@@ -327,6 +327,7 @@ describe('renderSessiongraph index', () => {
     removed: 0,
     discovered: 491,
     failed: [{ path: '/Users/admin/.dsh/sessions/x/session.v4.jsonl.zstd', reason: 'unexpected JSONL line' }],
+    live_sessions: 2,
     entries: 12345,
     sessions: 491,
     workspaces: 25,
@@ -343,6 +344,14 @@ describe('renderSessiongraph index', () => {
     expect(text).toContain('解析失败 1 个')
     expect(text).toContain('unexpected JSONL line')
     expect(text).toContain('491 个会话')
+    expect(text).toContain('本次重放 2 个实时会话')
+  })
+
+  it('omits the replay line when the run replayed no live session', () => {
+    const quiet: SessiongraphValueFor<'index'> = { ...report, live_sessions: 0 }
+    const text = renderSessiongraph({}, quiet, OPTIONS)
+    expect(text).toContain('建索引完成')
+    expect(text).not.toContain('本次重放')
   })
 
   it('says nothing failed when nothing did', () => {
