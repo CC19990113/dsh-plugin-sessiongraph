@@ -63,20 +63,30 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # `pnpm -r publish` walks the workspace in dependency order and rewrites
-      # every `workspace:^` range into the concrete published version.
+      # `pnpm -r pack` rewrites every `workspace:^` range into the concrete
+      # version, and `npm publish` then uploads the tarball.
+      #
+      # NOT `pnpm publish`: on this runner pnpm 11 reports `Published package
+      # x@y` while the registry keeps only a `0.0.0-stage` placeholder — the
+      # version never appears and its slot stays taken (0.1.0 through 0.1.3 all
+      # hit this). `npm publish <tarball>` is the path that actually lands.
       #
       # `packages/native` ships its loader only: the `.node` kernel is a build
       # artifact (gitignored, produced by `build-native.sh`), so a fresh install
       # falls back to the TypeScript indexer until someone builds it locally.
       # That is the documented behaviour, not a missing step.
-      #
-      # `publishConfig.provenance` stays false for now: npm stages a **new**
-      # package's first publish and refuses to unpublish the staged version, so a
-      # provenance-bearing first release can leave the version slot unusable.
-      # Turn it back on once every package name already exists on the registry.
+      - name: Pack
+        run: pnpm -r pack --pack-destination "$RUNNER_TEMP/tarballs"
+
       - name: Publish
         if: steps.registry.outputs.published == 'false'
-        run: pnpm -r publish --access public --no-git-checks
+        run: |
+          set -euo pipefail
+          for tarball in "$RUNNER_TEMP"/tarballs/*.tgz; do
+            case "$tarball" in
+              *-root-*) echo "skip workspace root: $tarball"; continue ;;
+            esac
+            npm publish "$tarball" --access public --provenance=false
+          done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
