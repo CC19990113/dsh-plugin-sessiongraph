@@ -46,9 +46,13 @@ afterEach(async () => {
 function config(): ResolvedConfig {
   return {
     sessionsRoot: fixture.sessionsRoot,
+    indexRoot: fixture.indexRoot,
     maxEntryChars: 4_000,
     toolCallChars: 2_000,
     maxFileBytes: 64 * 1024 * 1024,
+    autoIndex: true,
+    backgroundIndexThreshold: 1_000,
+    maxLiveSessions: 8,
   }
 }
 

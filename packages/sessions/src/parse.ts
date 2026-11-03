@@ -204,7 +204,17 @@ function frameEnd(buffer: Buffer, start: number): number {
  * @returns the normalized session.
  */
 export function parseSessionLog(buffer: Buffer, fallbackId: string, limits: SessionParseLimits): ParsedSession {
-  const lines = decompressSessionLog(buffer).toString('utf8').split('\n')
+  return parseSessionLines(decompressSessionLog(buffer).toString('utf8').split('\n'), fallbackId, limits)
+}
+
+/**
+ * Parse an already-split JSONL log, keeping the harness's first-line header convention.
+ * @param lines - the decompressed log split on newline characters.
+ * @param fallbackId - id to use when the header is missing or has none.
+ * @param limits - bounds applied to stored entry text.
+ * @returns the normalized session.
+ */
+export function parseSessionLines(lines: readonly string[], fallbackId: string, limits: SessionParseLimits): ParsedSession {
   const firstLine = firstNonEmptyLine(lines)
   let header: JsonRecord | undefined
   let start = 0
@@ -217,7 +227,50 @@ export function parseSessionLog(buffer: Buffer, fallbackId: string, limits: Sess
       start = firstLine
     }
   }
+  const records: (JsonRecord | undefined)[] = []
+  for (let index = start; index < lines.length; index += 1) {
+    const line = (lines[index] as string).trim()
+    records.push(line === '' ? undefined : parseRecord(line))
+  }
+  return normalizeSession(header, records, fallbackId, limits)
+}
 
+/**
+ * Parse a session the host already holds in memory.
+ *
+ * The live view carries the header and the raw events as two values, which is the same information a
+ * log's first line and remaining lines carry. Both paths normalize through {@link normalizeSession},
+ * so a live session and its later on-disk copy cannot disagree about what is searchable.
+ * @param header - the session header object, as the host reports it.
+ * @param events - raw event objects, shaped like the JSONL lines that follow the header.
+ * @param fallbackId - id to use when the header has none.
+ * @param limits - bounds applied to stored entry text.
+ * @returns the normalized session.
+ */
+export function parseSessionEvents(
+  header: unknown,
+  events: readonly unknown[],
+  fallbackId: string,
+  limits: SessionParseLimits,
+): ParsedSession {
+  return normalizeSession(asRecord(header), events.map(event => asRecord(event)), fallbackId, limits)
+}
+
+/**
+ * Normalize a session header and its event stream into the shape the index writes.
+ * @param header - the parsed session header, or undefined when the log carries none.
+ * @param records - parsed events, where `undefined` stands for a line that failed to parse and is
+ *   skipped without failing the session.
+ * @param fallbackId - id to use when the header has none.
+ * @param limits - bounds applied to stored entry text.
+ * @returns the normalized session.
+ */
+function normalizeSession(
+  header: JsonRecord | undefined,
+  records: readonly (JsonRecord | undefined)[],
+  fallbackId: string,
+  limits: SessionParseLimits,
+): ParsedSession {
   const id = stringField(header, 'id') ?? fallbackId
   let createdAt = numberField(header, 'createdAt') ?? 0
   const parentSession = stringField(header, 'parentSession')
@@ -233,10 +286,7 @@ export function parseSessionLog(buffer: Buffer, fallbackId: string, limits: Sess
   let lastAt = createdAt
   let turns = 0
 
-  for (let index = start; index < lines.length; index += 1) {
-    const line = (lines[index] as string).trim()
-    if (line === '') continue
-    const record = parseRecord(line)
+  for (const record of records) {
     if (record === undefined) continue
 
     const seq = numberField(record, 'seq') ?? 0

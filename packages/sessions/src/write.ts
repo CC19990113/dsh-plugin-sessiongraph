@@ -33,12 +33,19 @@ import {
   tokenize,
 } from 'dsh-plugin-sessiongraph-service'
 import type { ParsedSession } from './parse.ts'
-import type { SessionFile } from './scan.ts'
 
-/** One parsed session paired with the file it came from. */
+/** One parsed session and the source it is recorded as coming from. */
 export interface IndexedSession {
   readonly session: ParsedSession
-  readonly file: SessionFile
+  /**
+   * Absolute path of the log it came from, or the synthetic `live://<id>` marker for a session the
+   * host still holds in memory and that has no stable file version yet.
+   */
+  readonly sourcePath: string
+  /** Source modification time, or 0 for a live session (there is no version to compare). */
+  readonly mtime: number
+  /** Source size in bytes, or 0 for a live session. */
+  readonly size: number
 }
 
 /**
@@ -208,7 +215,10 @@ function writeStatusFile(indexPath: string, indexedAt: number, summary: IndexWri
  * @param plan - what to write.
  */
 function writeAll(database: DatabaseSync, plan: IndexWritePlan): void {
-  const preserve = plan.preserveExisting && existsSync(plan.indexPath)
+  // Only a rebuild seeds itself from the previous index. An incremental run writes into the live
+  // database, which is the same file a preserved copy would be attached from, so there is nothing to
+  // copy and attaching it would lock the connection against its own transaction.
+  const preserve = plan.force && plan.preserveExisting && existsSync(plan.indexPath)
   if (preserve) database.exec(`ATTACH DATABASE '${escapeSqlLiteral(plan.indexPath)}' AS existing`)
   try {
     database.exec('BEGIN IMMEDIATE')
@@ -247,12 +257,12 @@ function writeAll(database: DatabaseSync, plan: IndexWritePlan): void {
       const insertFts = database.prepare(`INSERT INTO ${ENTRY_FTS_TABLE} (rowid, tokens) VALUES (?, ?)`)
 
       for (const item of plan.sessions) {
-        const { session, file } = item
+        const { session, sourcePath, mtime, size } = item
         // Keyed by id AND source path: a session whose id changed between runs must not leave its
         // old row behind, and the source path is the stable half of the pair.
-        removeFtsForSource.run(session.id, file.filePath)
-        removeEntriesForSource.run(session.id, file.filePath)
-        removeSessionForSource.run(session.id, file.filePath)
+        removeFtsForSource.run(session.id, sourcePath)
+        removeEntriesForSource.run(session.id, sourcePath)
+        removeSessionForSource.run(session.id, sourcePath)
 
         insertSession.run(
           session.id,
@@ -265,9 +275,9 @@ function writeAll(database: DatabaseSync, plan: IndexWritePlan): void {
           session.agentPreset ?? null,
           session.turns,
           session.entries.length,
-          file.filePath,
-          file.mtime,
-          file.size,
+          sourcePath,
+          mtime,
+          size,
         )
         for (const entry of session.entries) {
           const result = insertEntry.run(

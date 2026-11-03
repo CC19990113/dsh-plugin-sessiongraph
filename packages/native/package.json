@@ -1,0 +1,58 @@
+{
+  "name": "dsh-plugin-sessiongraph-native",
+  "version": "0.1.0",
+  "description": "Native Rust index kernel for DeepSeek Harness sessiongraph \u2014 scan, multi-frame zstd decode, JSONL parse and SQLite write, exposed to Node through napi-rs",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "sessiongraph",
+    "session",
+    "session-history",
+    "indexer",
+    "zstd",
+    "sqlite",
+    "rust",
+    "napi",
+    "ai-agent"
+  ],
+  "license": "MIT",
+  "author": "CC ZHAO",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CC19990113/dsh-plugin-sessiongraph.git",
+    "directory": "packages/native"
+  },
+  "homepage": "https://github.com/CC19990113/dsh-plugin-sessiongraph#readme",
+  "bugs": "https://github.com/CC19990113/dsh-plugin-sessiongraph/issues",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "*.node",
+    "lib/**/*.js",
+    "lib/**/*.d.ts"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "build:native": "./build-native.sh"
+  },
+  "optionalDependencies": {
+    "dsh-plugin-sessiongraph-native-darwin-arm64": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0"
+  }
+}

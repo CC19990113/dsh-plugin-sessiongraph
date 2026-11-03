@@ -1,0 +1,287 @@
+/**
+ * Tool-level wiring tests for the lazy refresh: the coordinator is unit-tested next door, but what
+ * matters to the model is the composed path — `apply` registers the tool, `execute` decides whether
+ * to refresh, the query always runs, and the answer carries the staleness marker when it should.
+ *
+ * The `ctx` here is a structural stand-in for the three services the plugin injects and nothing more:
+ * importing a real cordis Context would drag the host composition in, while the seam itself is
+ * exercised by the refresh unit tests.
+ * @module dsh-plugin-sessiongraph-tool/tests/lazy-refresh-tool
+ */
+
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { Context } from '@deepseek-ai/cordis'
+import type { SessiongraphIndexReport, SessiongraphSearchResult } from 'dsh-plugin-sessiongraph-service'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { apply } from '../src/index.ts'
+import type { Config } from '../src/index.ts'
+
+/** The slice of a registered tool these tests drive. */
+interface RegisteredTool {
+  name: string
+  execute(args: unknown, exec: unknown): Promise<unknown>
+  output: { render(args: unknown, value: unknown): { type: string; text: string }[] }
+}
+
+/** One composed tool family over a fake service, with the call order it observed. */
+interface Harness {
+  readonly tools: Map<string, RegisteredTool>
+  readonly calls: string[]
+  /** The options object each `ctx.sessiongraph.index` call carried. */
+  readonly options: Array<Record<string, unknown>>
+}
+
+const THRESHOLD = 300_000
+const STALE = 600_000
+const FRESH = 1_000
+
+let root: string
+
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), 'sessiongraph-lazy-'))
+  writeFileSync(join(root, 'index.db'), 'stub index')
+  writeStatus(STALE)
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  rmSync(root, { recursive: true, force: true })
+})
+
+/** Write the sidecar prompt assembly and the refresh decision both read. */
+function writeStatus(ageMs: number): void {
+  writeFileSync(join(root, 'status.json'), JSON.stringify({
+    schemaVersion: 1,
+    indexedAt: Date.now() - ageMs,
+    sessions: 1,
+    entries: 1,
+    workspaces: 1,
+    bytes: 100,
+  }))
+}
+
+/** A finished report shaped like the sessions indexer's. */
+function report(): SessiongraphIndexReport {
+  return {
+    indexPath: join(root, 'index.db'),
+    added: 0,
+    updated: 0,
+    skipped: 1,
+    removed: 0,
+    discovered: 1,
+    failed: [],
+    entries: 1,
+    sessions: 1,
+    workspaces: 1,
+    bytes: 100,
+    elapsedMs: 5,
+  }
+}
+
+/** One search hit, so the answer is recognizably the query's own result. */
+function searchResult(): SessiongraphSearchResult {
+  return {
+    operation: 'search',
+    hits: [{
+      sessionId: '037ad8fc-29b8-4a69-9a02-e75f9cc8fb45' as SessiongraphSearchResult['hits'][number]['sessionId'],
+      title: '改广告 SDK',
+      workspace: '/Users/admin/www/dsh-community',
+      time: Date.now(),
+      kind: 'user',
+      seq: 12,
+      turn: 3,
+      snippet: '我今天在改[广告]SDK',
+      length: 30,
+    }],
+    total: 1,
+    truncated: false,
+  }
+}
+
+/**
+ * Register the plugin against a fake service.
+ * @param index - what `ctx.sessiongraph.index` does; the seam's call is recorded either way.
+ * @param options - per-test overrides (threshold, config shape).
+ * @returns the registered tools and the observed call order.
+ */
+function harness(
+  index: () => Promise<unknown>,
+  options: { threshold?: number; indexRoot?: string } = {},
+): Harness {
+  const tools = new Map<string, RegisteredTool>()
+  const calls: string[] = []
+  const optionsSeen: Array<Record<string, unknown>> = []
+  const sections: string[] = []
+  const indexRoot = options.indexRoot ?? root
+  const ctx = {
+    systemPrompt: {
+      section: (section: { text: string | ((context: unknown) => string) }) => {
+        sections.push(typeof section.text === 'string' ? section.text : section.text({}))
+      },
+    },
+    tools: {
+      register: (definition: RegisteredTool) => {
+        tools.set(definition.name, definition)
+      },
+    },
+    sessiongraph: {
+      async query(request: { operation: string }) {
+        calls.push(`query:${request.operation}`)
+        return request.operation === 'status'
+          ? {
+              operation: 'status',
+              indexed: true,
+              indexPath: join(indexRoot, 'index.db'),
+              sessions: 1,
+              entries: 1,
+              workspaces: 1,
+              indexedAt: Date.now(),
+              bytes: 100,
+            }
+          : searchResult()
+      },
+      async index(_root: string, indexOptions: Record<string, unknown>) {
+        calls.push('index')
+        optionsSeen.push(indexOptions)
+        return index()
+      },
+    },
+  }
+  const config: Config = {
+    indexRoot,
+    maxLimit: 100,
+    maxSnippetChars: 600,
+    freshnessThresholdMs: options.threshold ?? THRESHOLD,
+    timeoutMs: 30_000,
+    indexTimeoutMs: 300_000,
+  }
+  apply(ctx as unknown as Context, config)
+  return { tools, calls, options: optionsSeen }
+}
+
+/** The execution context a tool body reads: the signal, plus an owning agent when a test needs one. */
+function exec(agentId?: string): unknown {
+  return {
+    signal: new AbortController().signal,
+    ...(agentId === undefined ? {} : { agent: { id: agentId } }),
+  }
+}
+
+/** Fetch a registered tool, failing loudly when the plugin did not register it. */
+function tool(harnessed: Harness, name: string): RegisteredTool {
+  const found = harnessed.tools.get(name)
+  if (found === undefined) throw new Error(`tool ${name} was not registered`)
+  return found
+}
+
+describe('lazy refresh through the registered tool', () => {
+  it('refreshes before the query and answers with the refreshed result', async () => {
+    const subject = harness(async () => report())
+    const value = await tool(subject, 'sessiongraph').execute({ operation: 'search', query: '广告' }, exec('session-1'))
+
+    expect(subject.calls).toEqual(['index', 'query:search'])
+    // A lazy refresh must stay synchronous even when the query has an owning agent: no `owner`,
+    // hence no background job to wait for.
+    expect(subject.options[0]).toEqual({ force: false })
+    expect(value).toMatchObject({ operation: 'search', total: 1 })
+    expect('stale' in (value as object)).toBe(false)
+    const text = tool(subject, 'sessiongraph').output.render({ operation: 'search', query: '广告' }, value)[0]?.text
+    expect(text).toContain('我今天在改[广告]SDK')
+    expect(text).not.toContain('可能不是最新')
+  })
+
+  it('answers from the existing index when the refresh fails, and says the answer may be behind', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const subject = harness(async () => {
+      throw new Error('indexer exploded')
+    })
+    const value = await tool(subject, 'sessiongraph').execute({ operation: 'search', query: '广告' }, exec())
+
+    expect(subject.calls).toEqual(['index', 'query:search'])
+    expect(value).toMatchObject({ operation: 'search', total: 1, stale: true })
+    const text = tool(subject, 'sessiongraph').output.render({ operation: 'search', query: '广告' }, value)[0]?.text
+    expect(text).toContain('可能不是最新')
+    expect(console.error).toHaveBeenCalledTimes(1)
+  })
+
+  it('runs one incremental index for two queries issued together', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const subject = harness(async () => {
+      await gate
+      return report()
+    })
+    const registered = tool(subject, 'sessiongraph')
+
+    const first = registered.execute({ operation: 'search', query: '广告' }, exec())
+    const second = registered.execute({ operation: 'timeline' }, exec())
+    release()
+    const values = await Promise.all([first, second])
+
+    expect(subject.calls.filter(call => call === 'index')).toHaveLength(1)
+    expect(values).toHaveLength(2)
+  })
+
+  it('leaves a fresh index alone and skips the refresh entirely when it is disabled', async () => {
+    writeStatus(FRESH)
+    const fresh = harness(async () => report())
+    await tool(fresh, 'sessiongraph').execute({ operation: 'search', query: '广告' }, exec())
+    expect(fresh.calls).toEqual(['query:search'])
+
+    writeStatus(STALE)
+    const disabled = harness(async () => report(), { threshold: 0 })
+    await tool(disabled, 'sessiongraph').execute({ operation: 'search', query: '广告' }, exec())
+    expect(disabled.calls).toEqual(['query:search'])
+  })
+
+  it('never refreshes for status, which describes the index itself', async () => {
+    const subject = harness(async () => report())
+    const value = await tool(subject, 'sessiongraph').execute({ operation: 'status' }, exec())
+
+    expect(subject.calls).toEqual(['query:status'])
+    expect(value).toMatchObject({ operation: 'status', indexed: true })
+  })
+
+  it('lets the manual index tool run on a fresh index, because the model asked for it', async () => {
+    writeStatus(FRESH)
+    const subject = harness(async () => report())
+    await tool(subject, 'sessiongraph_index').execute({}, exec('session-1'))
+
+    expect(subject.calls).toEqual(['index'])
+    expect(subject.options[0]).toEqual({ owner: 'session-1' })
+  })
+
+  it('reports the job id when a large manual run goes to the background', async () => {
+    const subject = harness(async () => ({ ...report(), jobId: 'job-7' }))
+    const value = await tool(subject, 'sessiongraph_index').execute({ force: true }, exec('session-1'))
+
+    expect(value).toEqual({ operation: 'index', status: 'started', job_id: 'job-7' })
+    const text = tool(subject, 'sessiongraph_index').output.render({}, value)[0]?.text
+    expect(text).toContain('已在后台建索引')
+    expect(text).toContain('job-7')
+    expect(text).toContain('sessiongraph status')
+  })
+
+  it('renders a completed manual run as a report even though it named its owner', async () => {
+    const subject = harness(async () => report())
+    const value = await tool(subject, 'sessiongraph_index').execute({}, exec('session-1'))
+
+    expect(value).toMatchObject({ operation: 'index', added: 0, skipped: 1 })
+    expect('status' in (value as object)).toBe(false)
+    const text = tool(subject, 'sessiongraph_index').output.render({}, value)[0]?.text
+    expect(text).toContain('建索引完成')
+    expect(text).not.toContain('已在后台建索引')
+  })
+
+  it('sends no owner when the call has no owning agent, so the indexer falls back to running in place', async () => {
+    const subject = harness(async () => report())
+    await tool(subject, 'sessiongraph_index').execute({}, exec())
+
+    expect(subject.options[0]).toEqual({})
+    expect('owner' in (subject.options[0] ?? {})).toBe(false)
+  })
+})

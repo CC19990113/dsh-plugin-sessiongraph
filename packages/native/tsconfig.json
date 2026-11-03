@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // No sibling projects to reference: the loader is plain Node glue with no workspace imports.
+    "paths": {},
+    "rootDir": "./src",
+    "outDir": "./lib",
+    "tsBuildInfoFile": "./lib/.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"]
+}

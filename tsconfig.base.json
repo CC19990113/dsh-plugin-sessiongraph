@@ -37,6 +37,8 @@
       "dsh-plugin-sessiongraph-sqlite/invariant": ["./packages/sqlite/src/invariant.ts"],
       "dsh-plugin-sessiongraph-sessions": ["./packages/sessions/src"],
       "dsh-plugin-sessiongraph-sessions/invariant": ["./packages/sessions/src/invariant.ts"],
+      "dsh-plugin-sessiongraph-native": ["./packages/native/src"],
+      "dsh-plugin-sessiongraph-native/invariant": ["./packages/native/src/invariant.ts"],
       "dsh-plugin-sessiongraph-tool": ["./packages/tool/src"],
       "dsh-plugin-sessiongraph-tool/invariant": ["./packages/tool/src/invariant.ts"]
     }

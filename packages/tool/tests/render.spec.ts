@@ -113,6 +113,12 @@ describe('renderSessiongraph search', () => {
     expect(text).toContain('没有命中「不存在的词」')
     expect(text).toContain('/Users/x')
   })
+
+  it('marks an answer served from an index the query path could not refresh', () => {
+    const stale: SessiongraphValueFor<'search'> = { ...hits, stale: true }
+    expect(renderSessiongraph({ query: '广告' }, stale, OPTIONS)).toContain('可能不是最新')
+    expect(renderSessiongraph({ query: '广告' }, hits, OPTIONS)).not.toContain('可能不是最新')
+  })
 })
 
 describe('renderSessiongraph session', () => {

@@ -164,3 +164,47 @@ schema 见 `packages/service/src/schema.ts`（`SCHEMA_STATEMENTS`），三方共
 2. `pnpm test` 全绿（registry 单测、tokenize 单测、解析器单测、查询单测）
 3. 真机：索引全机 491 会话 → `search "广告"` 命中，`session <id>` 可读，`status` 报数正确
 4. 装进 profile 后模型实际调用可用
+
+## 9. 新鲜度策略（三道）
+
+索引必须跟得上对话，但不能拖慢任何东西。
+
+| 时机 | 机制 | 成本 | 作用 |
+|---|---|---|---|
+| 会话创建 | `agent/created` → `ctx.jobs` 后台增量 | 90–274ms（后台） | 开新会话时把上个会话的内容补进来 |
+| 查询前 | `status.json` 的 `indexedAt` 超过 `freshnessThresholdMs`（默认 5 分钟）→ 先增量再查 | 90–274ms（同步，仅超阈值时） | 当前会话刚说过的话也能查到 |
+| 显式 | `sessiongraph_index` 工具 / 手动 | 全量 21s 或增量 | 首次建库、强制刷新 |
+
+**没有索引时不自动建**：首建 21s 太重，必须由模型或用户显式触发（`sessiongraph_index`）。自动路径只维护「已有索引」。
+
+**大库转后台**：`status.json` 的 `sessions` ≥ `backgroundIndexThreshold`（默认 1000）时，`sessiongraph_index` 走 `ctx.jobs.start`，工具立刻返回 job id 而不是占满 300s 预算。
+
+**并发保护**：同一 indexRoot 在同一进程内同时只允许一次增量（in-flight 去重）。
+
+## 10. 为什么不用 `ctx.fs.watch`
+
+`ctx.fs` 是**工作区**抽象，`resolve/listDir/watch` 都相对当前 session 的 `cwd`。会话日志在 `~/.dsh/sessions`，是宿主本机路径，不属于任何工作区 —— 走 fs seam 既解析不到，也没有额外好处。真要「文件变化即索引」得用本地 `fs.watch` 监听 641 个会话目录，开销远大于收益；查询前惰性增量（90–274ms）更简单可靠。
+
+## 11. 复用宿主能力（不重造轮子）
+
+DSH 内核已经有一整套会话查询设施，能用的直接用：
+
+| 宿主能力 | 我们用不用 | 为什么 |
+|---|---|---|
+| `ctx.sessionQuery.listSessions()` / `readSession(id)` | **用** | 拿到 `live: true` 的会话（当前还没落盘的），补「刚才说的话查不到」的断档；事件结构与 jsonl 同构，解析器直接复用 |
+| `ctx.sessionQuery.traceSession(id)` | 可选 | 我们自己也从 header 算 parentSession，够用 |
+| `ctx.sessionQuery.searchSessions()` / `searchEvents()` | **不用** | 它的 tokenizer 是 `unicode61`，无任何 CJK 处理（包里搜 `4e00`/`CJK`/`bigram` 零命中）。实测 `我今天在改广告SDK` 整句是一个 token，搜「广告」查不到。中文检索必须自建 bigram |
+| `ctx.jobs.start` | **用** | 自动增量、大库后台索引 |
+| `ctx.commands` | **用** | `/sessiongraph` 斜杠命令 |
+| `ctx.fs.watch` | 不用 | 见第 10 节 |
+
+**挂载方式**：`packages/bundle/cordis.patch.yml` 里插一行 `@deepseek-ai/dsh-session-query-sqlite`，配置 `path: ':memory:'` + `openAt: never` —— 只激活读取侧，不建也不持久化它的 FTS 索引，零成本。第三方 bundle 引用宿主内核包是受支持的（`dsh-plugin-qq-vibe` 就这么引用 `dsh-persona` / `dsh-tool-bash`）。
+
+**降级**：索引器用 `ctx.get('sessionQuery')` 而不是 `inject`，拿不到就只走文件路径，插件照常工作。
+
+## 12. 数据源混合模式
+
+- **主路径**：文件扫描 + 多帧解压 + `mtime`/`size` 增量（638 会话 21s / 增量 90–274ms）
+- **补充路径**：每轮问 `sessionQuery.listSessions()`，挑 `live === true` 的（通常 1–3 个），`readSession()` 拿事件后重建。上限 `maxLiveSessions`（默认 8）
+- live 会话每轮都重建（它们还在变，没有稳定 mtime 可依赖）
+- live 路径放在主写事务**之外**，`readSession` 回放慢也不拖长主索引

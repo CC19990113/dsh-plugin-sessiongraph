@@ -57,6 +57,12 @@ importers:
         specifier: workspace:^
         version: link:../tool
 
+  packages/native:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.5
+
   packages/service:
     dependencies:
       '@deepseek-ai/schemastery':
@@ -119,6 +125,9 @@ importers:
       dsh-plugin-sessiongraph-service:
         specifier: workspace:^
         version: link:../service
+      dsh-plugin-sessiongraph-sessions:
+        specifier: workspace:^
+        version: link:../sessions
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1

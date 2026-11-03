@@ -125,6 +125,16 @@ const COUNTS = {
 } as const
 
 /**
+ * Optional "this answer may predate the conversation" marker, set only when the query path tried an
+ * incremental refresh and could not finish one (it failed, or was handed to a background job). An
+ * answer from an index that is merely a little old keeps it absent: a boolean on every result that is
+ * almost always false is noise a model learns to ignore.
+ */
+const STALE = {
+  stale: { type: 'boolean' },
+} as const
+
+/**
  * Build one `oneOf` member for a fixed operation name.
  *
  * Both type parameters are `const` so the member keeps its literal types: without them the helper
@@ -154,20 +164,24 @@ export const SESSIONGRAPH_OUTPUT_SCHEMA = {
     member('search', {
       hits: { type: 'array', required: true, items: HIT },
       ...COUNTS,
+      ...STALE,
     }),
     member('session', {
       session: REQUIRED_SESSION_SUMMARY,
       entries: { type: 'array', required: true, items: ENTRY },
       children: { type: 'array', required: true, items: { type: 'string' } },
       truncated: { type: 'boolean', required: true },
+      ...STALE,
     }),
     member('timeline', {
       sessions: { type: 'array', required: true, items: SESSION_SUMMARY },
       truncated: { type: 'boolean', required: true },
+      ...STALE,
     }),
     member('workspaces', {
       workspaces: { type: 'array', required: true, items: WORKSPACE_STAT },
       total: { type: 'integer', required: true },
+      ...STALE,
     }),
     member('status', {
       indexed: { type: 'boolean', required: true },
@@ -177,6 +191,16 @@ export const SESSIONGRAPH_OUTPUT_SCHEMA = {
       workspaces: { type: 'integer', required: true },
       indexed_at: { type: 'integer' },
       bytes: { type: 'integer', required: true },
+    }),
+    // An index run on a store large enough to outlive the call is handed to the host's background
+    // job registry, and the call answers before it has a report to give. `index` is therefore two
+    // members rather than one object with optional counts: the started member carries only what the
+    // call honestly knows — a job id — while the report member keeps every count required, so a
+    // renderer never invents a zero for a run that has not finished. "0 added" and "not run yet" are
+    // different answers and must stay distinguishable.
+    member('index', {
+      status: { type: 'string', required: true, const: 'started' },
+      job_id: { type: 'string', required: true },
     }),
     member('index', {
       index_path: { type: 'string', required: true },

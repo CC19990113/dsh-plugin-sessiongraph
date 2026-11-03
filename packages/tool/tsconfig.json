@@ -11,5 +11,5 @@
     "outDir": "lib"
   },
   "include": ["src"],
-  "references": [{ "path": "../service" }]
+  "references": [{ "path": "../service" }, { "path": "../sessions" }]
 }

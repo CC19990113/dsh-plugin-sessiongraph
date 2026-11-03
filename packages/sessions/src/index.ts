@@ -18,6 +18,18 @@
  * `autoIndex`): a machine that already has one stays fresh without the model remembering to ask. A
  * missing index is deliberately left alone — the first build reads every log on the machine and is
  * the caller's explicit decision (`sessiongraph_index`), not something to trigger on a session start.
+ *
+ * Sessions the host still holds in memory (`ctx.sessionQuery`) are indexed as well, in a second pass
+ * after the file-path transaction commits: a conversation that is still running has no log on disk
+ * yet, and "where did I say X" has to include what was just typed. That pass is optional — a host
+ * without the service leaves the file-path result exactly as it was, and one that fails degrades to
+ * it instead of failing the run.
+ *
+ * An explicit run is handed to the host's background-job registry too once the store is large enough
+ * (`backgroundIndexThreshold`), because a run that grows past a tool's timeout budget must not hold
+ * that call open. The seam types `index()` as returning a report, so a delegated run comes back as a
+ * report carrying `jobId` — see {@link isBackgroundIndexReport} for the discrimination a consumer
+ * needs, and {@link SessiongraphBackgroundIndexReport} for what its other fields then mean.
  * @module dsh-plugin-sessiongraph-sessions
  */
 
@@ -33,6 +45,8 @@ import type {
   SessiongraphIndexOptions,
   SessiongraphIndexReport,
 } from 'dsh-plugin-sessiongraph-service'
+import { collectLiveSessions, LIVE_SOURCE_PREFIX } from './live.ts'
+import type { SessionQueryService } from './live.ts'
 import { parseSessionLog } from './parse.ts'
 import type { ParsedSession } from './parse.ts'
 import { scanSessions } from './scan.ts'
@@ -43,6 +57,8 @@ export { decompressSessionLog, parseSessionLog } from './parse.ts'
 export type { ParsedEntry, ParsedSession, SessionParseLimits } from './parse.ts'
 export { scanSessions } from './scan.ts'
 export type { SessionFile } from './scan.ts'
+export { LIVE_SOURCE_PREFIX } from './live.ts'
+export type { LiveIndexOptions, LiveIndexResult, SessionQueryService } from './live.ts'
 export { readIndexState, STATUS_RELATIVE_PATH, writeIndex } from './write.ts'
 export type { ExistingSession, IndexWritePlan, IndexWriteResult, IndexedSession } from './write.ts'
 
@@ -64,8 +80,17 @@ export const DEFAULT_SESSIONS_ROOT = join(homedir(), '.dsh', 'sessions')
  */
 export const DEFAULT_INDEX_ROOT = join(homedir(), '.dsh', 'sessiongraph')
 
-/** Stable job kind of an automatic session-start refresh, used for retention and diagnostics. */
+/** Stable job kind of a background index run, used for retention and diagnostics. */
 export const AUTO_INDEX_JOB_KIND = 'sessiongraph-index'
+
+/** Default number of session logs at which a manual index run becomes a background job. */
+export const DEFAULT_BACKGROUND_INDEX_THRESHOLD = 1_000
+
+/**
+ * Default cap on live sessions rebuilt per run. A host normally reports one or two; the cap exists
+ * because replaying a live log is not incremental and a host could report many.
+ */
+export const DEFAULT_MAX_LIVE_SESSIONS = 8
 
 /** Default cap on stored message text, in characters. */
 export const DEFAULT_MAX_ENTRY_CHARS = 4_000
@@ -101,6 +126,17 @@ export interface Config {
    * machine with no index yet is skipped on purpose — see {@link DEFAULT_INDEX_ROOT}.
    */
   autoIndex?: boolean
+  /**
+   * Hand an explicit index run to the host's background-job registry once the session store holds at
+   * least this many logs (default 1000). Below it the run is synchronous, because a small index is
+   * faster than the round-trip through `job_output`.
+   */
+  backgroundIndexThreshold?: number
+  /**
+   * Most live (still-running) sessions to rebuild per run (default 8). They come from the host's
+   * `ctx.sessionQuery` and are always rebuilt in full, so the cap bounds the replay cost.
+   */
+  maxLiveSessions?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -110,6 +146,8 @@ export const Config: z<Config> = z.object({
   toolCallChars: z.number().default(DEFAULT_TOOL_CALL_CHARS),
   maxFileBytes: z.number().default(DEFAULT_MAX_FILE_BYTES),
   autoIndex: z.boolean().default(true),
+  backgroundIndexThreshold: z.number().default(DEFAULT_BACKGROUND_INDEX_THRESHOLD),
+  maxLiveSessions: z.number().default(DEFAULT_MAX_LIVE_SESSIONS),
 })
 
 /** Configuration after the schema filled in every default. */
@@ -125,11 +163,13 @@ export function apply(ctx: Context, config: Config): void {
   assertPositiveInteger('maxEntryChars', resolved.maxEntryChars)
   assertPositiveInteger('toolCallChars', resolved.toolCallChars)
   assertPositiveInteger('maxFileBytes', resolved.maxFileBytes)
+  assertPositiveInteger('backgroundIndexThreshold', resolved.backgroundIndexThreshold)
+  assertPositiveInteger('maxLiveSessions', resolved.maxLiveSessions)
   if (resolved.indexRoot.trim() === '') {
     throw new Error('sessiongraph-sessions: indexRoot must be a non-empty directory path')
   }
 
-  const indexer = createIndexer(resolved)
+  const indexer = createIndexer(ctx, resolved)
   // Process-local, private to this plugin instance: a root is auto-refreshed at most once per
   // process, so a burst of session creations cannot queue a burst of index runs.
   const autoIndexed = new Set<string>()
@@ -149,10 +189,11 @@ export function apply(ctx: Context, config: Config): void {
 
 /**
  * Build the indexer object this plugin registers.
+ * @param ctx - the plugin context; only its optional `jobs` service is consulted.
  * @param config - the resolved plugin configuration.
  * @returns the seam provider.
  */
-export function createIndexer(config: ResolvedConfig): SessiongraphIndexer {
+export function createIndexer(ctx: Context, config: ResolvedConfig): SessiongraphIndexer {
   return {
     id: SessiongraphIndexerId(DEFAULT_INDEXER_ID),
     async canIndex(indexRoot) {
@@ -164,7 +205,9 @@ export function createIndexer(config: ResolvedConfig): SessiongraphIndexer {
       }
     },
     async index(indexRoot, options, signal) {
-      return runIndex(indexRoot, options, signal, config)
+      const jobId = await startBackgroundIndex(ctx, indexRoot, options, config)
+      if (jobId !== undefined) return backgroundIndexReport(indexRoot, jobId)
+      return runIndex(indexRoot, options, signal, config, ctx)
     },
   }
 }
@@ -254,6 +297,28 @@ interface AutoIndexJobOutcome {
 }
 
 /**
+ * The report a backgrounded index run returns. The seam types `index()` as returning a report, which
+ * is what a caller awaits; a run that was delegated instead comes back with this extra field, and a
+ * consumer distinguishes the two cases through {@link isBackgroundIndexReport}.
+ */
+export interface SessiongraphBackgroundIndexReport extends SessiongraphIndexReport {
+  /** Id of the background job that owns the run. */
+  readonly jobId: string
+}
+
+/**
+ * Whether an index result came from a delegated run rather than a completed one.
+ *
+ * The seam's return type is the completed report, so a job id can only arrive as an extension of it;
+ * every other field of a delegated result describes the index as it stood when the job started.
+ * @param report - the value `ctx.sessiongraph.index()` resolved with.
+ * @returns true when the run is still going in the host's job registry.
+ */
+export function isBackgroundIndexReport(report: SessiongraphIndexReport): report is SessiongraphBackgroundIndexReport {
+  return typeof (report as Partial<SessiongraphBackgroundIndexReport>).jobId === 'string'
+}
+
+/**
  * Refresh an existing index in the background, once per process, when a session is created.
  *
  * Runs synchronously inside `agent/created` dispatch, which happens during agent registration, so it
@@ -290,7 +355,7 @@ function scheduleAutoIndex(
       owner: agent.id,
       kind: AUTO_INDEX_JOB_KIND,
       label: `sessiongraph refresh for ${workspace}`,
-      run: handle => runAutoIndexJob(indexRoot, config, handle),
+      run: handle => runIndexJob(indexRoot, {}, config, handle),
     })
     // Marked only after the registry accepted the job, so a refusal leaves the root eligible for
     // the next session that opens.
@@ -303,34 +368,187 @@ function scheduleAutoIndex(
 }
 
 /**
- * The producer body of one automatic refresh job.
+ * Hand one explicit index run to the host's background-job registry, when the run is large enough to
+ * outlive a tool call.
+ *
+ * The indexer itself never sees the calling agent — the seam passes it an index root and switches,
+ * not an execution context — so the owning session id arrives as a runtime extension of the options
+ * object the tool passes through. Without it this returns immediately and the caller runs in place;
+ * a composition that predates this contract keeps its old behaviour instead of failing.
+ *
+ * Every other reason not to start a job (no registry, no controller for the agent, the owner already
+ * at its job cap) also falls back to the synchronous run rather than surfacing an error the model
+ * cannot act on.
+ * @param ctx - the plugin context, consulted for the optional job registry.
+ * @param indexRoot - the index to build.
+ * @param options - scope and rebuild switches, plus the caller's owning session id when it is known.
+ * @param config - the resolved plugin configuration.
+ * @returns the started job's id, or `undefined` when this call must index synchronously.
+ */
+async function startBackgroundIndex(
+  ctx: Context,
+  indexRoot: string,
+  options: SessiongraphIndexOptions,
+  config: ResolvedConfig,
+): Promise<string | undefined> {
+  try {
+    const owner = indexJobOwner(options)
+    if (owner === undefined) return undefined
+    // A scoped run touches one workspace or one session: the round trip through `job_output` would
+    // cost more than the run itself.
+    if (options.workspace !== undefined || options.sessionId !== undefined) return undefined
+    const jobs = ctx.get('jobs') as AutoIndexJobRegistry | undefined
+    if (jobs === undefined) return undefined
+    // Asked last, so a composition without a registry never pays for the store scan below. The
+    // source count is the run's real size; the sidecar only describes what the last run saw.
+    if ((await countSessionFiles(config.sessionsRoot)) < config.backgroundIndexThreshold) return undefined
+    return jobs.start({
+      owner,
+      kind: AUTO_INDEX_JOB_KIND,
+      label: `sessiongraph index ${indexRoot}`,
+      run: handle => runIndexJob(indexRoot, options, config, handle),
+    })
+  } catch {
+    // No controller serves this agent, or the owner already holds its maximum number of jobs: both
+    // mean "do the work here instead", never "fail the model's call".
+    return undefined
+  }
+}
+
+/**
+ * The report a delegated run resolves with: the index as it stands, plus the job that will replace it.
+ *
+ * Nothing was written by this call, so every per-run counter is zero; `sessions`, `entries`,
+ * `workspaces` and `bytes` are the previous run's totals, read from the sidecar without opening
+ * SQLite.
+ * @param indexRoot - the index being built.
+ * @param jobId - the job that owns the background run.
+ * @returns the delegated result.
+ */
+function backgroundIndexReport(indexRoot: string, jobId: string): SessiongraphBackgroundIndexReport {
+  const status = readStatusFile(indexRoot)
+  return {
+    indexPath: join(indexRoot, INDEX_RELATIVE_PATH),
+    added: 0,
+    updated: 0,
+    skipped: 0,
+    removed: 0,
+    discovered: status?.sessions ?? 0,
+    failed: [],
+    entries: status?.entries ?? 0,
+    sessions: status?.sessions ?? 0,
+    workspaces: status?.workspaces ?? 0,
+    bytes: status?.bytes ?? 0,
+    elapsedMs: 0,
+    jobId,
+  }
+}
+
+/**
+ * The owning session id a caller attached to an index request, when it attached one.
+ * @param options - the seam's index options, possibly extended by the consumer.
+ * @returns the session id, or undefined when the caller cannot own a job.
+ */
+function indexJobOwner(options: SessiongraphIndexOptions): string | undefined {
+  const owner = (options as SessiongraphIndexOptions & { readonly owner?: unknown }).owner
+  return typeof owner === 'string' && owner !== '' ? owner : undefined
+}
+
+/**
+ * Count the session logs an index run would read.
+ * @param sessionsRoot - the harness session store.
+ * @returns the number of logs, or zero when the store cannot be listed.
+ */
+async function countSessionFiles(sessionsRoot: string): Promise<number> {
+  try {
+    return (await scanSessions(sessionsRoot)).length
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * The producer body of one background index run.
  *
  * Both halves of the host's job contract are mandatory: `cancel` aborts the run, and `done` settles
  * even on failure — a rejected `done` breaks the registry's bookkeeping and leaves the job looking
  * stuck forever.
- * @param indexRoot - the index to refresh.
+ * @param indexRoot - the index to build.
+ * @param options - scope and rebuild switches.
  * @param config - the resolved plugin configuration.
  * @param handle - the job's producer face, for the job's live log.
  * @returns the job's cancellation hook and settlement promise.
  */
-function runAutoIndexJob(indexRoot: string, config: ResolvedConfig, handle: AutoIndexJobHandle): AutoIndexJobHooks {
+function runIndexJob(
+  indexRoot: string,
+  options: SessiongraphIndexOptions,
+  config: ResolvedConfig,
+  handle: AutoIndexJobHandle,
+): AutoIndexJobHooks {
   const controller = new AbortController()
   const done = (async (): Promise<AutoIndexJobOutcome> => {
     try {
-      // No `force`: an unchanged log is skipped, which is what makes a session-start refresh cheap.
-      const report = await runIndex(indexRoot, {}, controller.signal, config)
+      // Deliberately not the caller's signal: a background run outlives the call that started it,
+      // so aborting that call must not abort the job. The job's own cancel does.
+      const report = await runIndex(indexRoot, options, controller.signal, config)
       handle.append(
-        `Refreshed ${indexRoot}: ${report.sessions} sessions, ${report.entries} entries ` +
+        `Indexed ${indexRoot}: ${report.sessions} sessions, ${report.entries} entries ` +
         `(${report.added} added, ${report.updated} updated, ${report.removed} removed).\n`,
       )
       return { status: 'completed' }
     } catch (error) {
       const message = describeError(error)
-      handle.append(`sessiongraph refresh failed for ${indexRoot}: ${message}\n`)
+      handle.append(`sessiongraph index failed for ${indexRoot}: ${message}\n`)
       return { status: 'failed', detail: message }
     }
   })()
   return { cancel: () => controller.abort(), done }
+}
+
+/** The facts a status sidecar carries, as this package writes and reads them. */
+interface IndexStatusSnapshot {
+  readonly indexedAt: number
+  readonly sessions: number
+  readonly entries: number
+  readonly workspaces: number
+  readonly bytes: number
+}
+
+/**
+ * Read the sidecar summary a previous run left beside the index.
+ * @param indexRoot - directory to inspect.
+ * @returns the snapshot, or undefined when it is absent, unreadable, or not shaped like one.
+ */
+function readStatusFile(indexRoot: string): IndexStatusSnapshot | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(readFileSync(join(indexRoot, STATUS_RELATIVE_PATH), 'utf8'))
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const record = parsed as Record<string, unknown>
+  const indexedAt = numberField(record, 'indexedAt')
+  const sessions = numberField(record, 'sessions')
+  const entries = numberField(record, 'entries')
+  const workspaces = numberField(record, 'workspaces')
+  const bytes = numberField(record, 'bytes')
+  if (
+    indexedAt === undefined || sessions === undefined || entries === undefined
+    || workspaces === undefined || bytes === undefined
+  ) return undefined
+  return { indexedAt, sessions, entries, workspaces, bytes }
+}
+
+/**
+ * Read one numeric field of a parsed object.
+ * @param record - the parsed object.
+ * @param key - field name.
+ * @returns the number, or undefined when the field is absent or not finite.
+ */
+function numberField(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 /**
@@ -342,16 +560,7 @@ function runAutoIndexJob(indexRoot: string, config: ResolvedConfig, handle: Auto
  * @returns true when an existing index is safe to refresh in place.
  */
 function hasExistingIndex(indexRoot: string): boolean {
-  if (!existsSync(join(indexRoot, INDEX_RELATIVE_PATH))) return false
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(readFileSync(join(indexRoot, STATUS_RELATIVE_PATH), 'utf8'))
-  } catch {
-    return false
-  }
-  if (typeof parsed !== 'object' || parsed === null) return false
-  const record = parsed as Record<string, unknown>
-  return typeof record['indexedAt'] === 'number' && typeof record['sessions'] === 'number'
+  return existsSync(join(indexRoot, INDEX_RELATIVE_PATH)) && readStatusFile(indexRoot) !== undefined
 }
 
 /**
@@ -371,6 +580,8 @@ function expandHome(path: string): string {
  * @param options - scope and rebuild switches.
  * @param signal - aborts between sessions.
  * @param config - the resolved plugin configuration.
+ * @param ctx - the plugin context, consulted for the optional live-session source. Omitted by
+ *   callers that only exercise the file path, which then behave exactly as an older host would.
  * @returns what the run did.
  */
 export async function runIndex(
@@ -378,6 +589,7 @@ export async function runIndex(
   options: SessiongraphIndexOptions,
   signal: AbortSignal | undefined,
   config: ResolvedConfig,
+  ctx?: Context,
 ): Promise<SessiongraphIndexReport> {
   const startedAt = Date.now()
   const indexPath = join(indexRoot, INDEX_RELATIVE_PATH)
@@ -432,7 +644,7 @@ export async function runIndex(
     }
 
     if (scoped && !inScope(session.cwd, session.id)) continue
-    candidates.push({ session, file })
+    candidates.push({ session, sourcePath: file.filePath, mtime: file.mtime, size: file.size })
     if (existing === undefined) added += 1
     else updated += 1
   }
@@ -441,6 +653,9 @@ export async function runIndex(
   // kept, because "not in this scan" says nothing about a source the caller excluded on purpose.
   const removed: string[] = []
   for (const [sourcePath, row] of previous ?? []) {
+    // Live rows carry a synthetic source path and are rebuilt from the live view every run; a file
+    // scan saying nothing about them is not evidence that their session disappeared.
+    if (sourcePath.startsWith(LIVE_SOURCE_PREFIX)) continue
     if (seen.has(sourcePath)) continue
     if (scoped && !inScope(row.workspace, row.id)) continue
     removed.push(row.id)
@@ -448,10 +663,10 @@ export async function runIndex(
 
   signal?.throwIfAborted()
   const indexedAt = Date.now()
-  const outcome = writeIndex({
+  let outcome = writeIndex({
     indexPath,
     force,
-    preserveExisting: scoped && previous !== undefined,
+    preserveExisting: force && scoped && previous !== undefined,
     sessions: candidates,
     removed,
     discovered: files.length,
@@ -459,12 +674,50 @@ export async function runIndex(
     indexedAt,
   })
 
+  // The live pass runs after the file-path transaction committed, in a transaction of its own. A
+  // replay reads the whole in-memory log and can be slow; the file results must already be durable
+  // before it starts, and a failure here must not roll them back.
+  let liveSessions = 0
+  let liveSkipped = 0
+  const sessionQuery = ctx?.get('sessionQuery') as SessionQueryService | undefined
+  if (sessionQuery !== undefined) {
+    try {
+      const live = await collectLiveSessions(sessionQuery, {
+        maxLiveSessions: config.maxLiveSessions,
+        limits: { maxEntryChars: config.maxEntryChars, toolCallChars: config.toolCallChars },
+        inScope,
+      })
+      liveSessions = live.sessions.length
+      liveSkipped = live.skipped
+      if (live.sessions.length > 0) {
+        outcome = writeIndex({
+          indexPath,
+          force: false,
+          preserveExisting: false,
+          sessions: live.sessions,
+          removed: [],
+          discovered: files.length,
+          failed: failed.length,
+          indexedAt,
+        })
+      }
+    } catch (error) {
+      // A host without the service, an older kernel, or a failed persistence read: the file-path
+      // index is complete and committed, so the run degrades instead of failing.
+      liveSessions = 0
+      liveSkipped = 0
+      console.error(`sessiongraph-sessions: live session indexing skipped: ${describeError(error)}`)
+    }
+  }
+
   return {
     indexPath,
     added,
     updated,
     skipped,
     removed: removed.length,
+    liveSessions,
+    liveSkipped,
     discovered: files.length,
     failed,
     entries: outcome.entries,

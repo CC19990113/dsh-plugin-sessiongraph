@@ -5,6 +5,7 @@
     { "path": "./packages/service" },
     { "path": "./packages/sqlite" },
     { "path": "./packages/sessions" },
+    { "path": "./packages/native" },
     { "path": "./packages/tool" }
   ]
 }

@@ -8,6 +8,20 @@
 # harness data directory or moving `indexRoot` off the default.
 
 - insert:
+    # The host's own conversation-query service, mounted here so this bundle can
+    # read session events through the harness instead of re-implementing zstd
+    # frame walking and v3/v4 compatibility. `path: ':memory:'` and
+    # `openAt: never` deliberately keep its FTS5 backend cold: this bundle only
+    # wants the read side (`listSessions` / `readSession` / `traceSession`), and
+    # its `unicode61` tokenizer cannot answer Chinese two-character queries
+    # anyway — the bigram index in <indexRoot>/index.db is the search surface.
+    # Its own index is therefore not built, not persisted, and costs nothing.
+    - id: sessiongraph-session-query
+      name: '@deepseek-ai/dsh-session-query-sqlite'
+      config:
+        path: ':memory:'
+        openAt: never
+
     # Service Definition: publishes ctx.sessiongraph, the store/indexer provider
     # registries, and the normalized query vocabulary. Carries no index of its own.
     - id: sessiongraph

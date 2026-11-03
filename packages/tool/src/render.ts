@@ -111,6 +111,16 @@ function hitLines(hit: Extract<SessiongraphToolValue, { operation: 'search' }>['
   ]
 }
 
+/** The one line an answer carries when the index could not be brought up to date before querying. */
+export const STALE_NOTE =
+  '（注意：本次增量刷新没有完成，答案可能不是最新——索引里可能还没有刚才的对话。'
+  + '确实需要最新结果时可以调用 sessiongraph_index 强制刷新。）'
+
+/** Whether a value was served from an index the query path could not refresh first. */
+function isStale(value: SessiongraphToolValue): boolean {
+  return 'stale' in value && value.stale === true
+}
+
 /**
  * Render one result as the text the model reads.
  * @param args - the validated arguments, used for the few facts the value does not echo back.
@@ -119,6 +129,22 @@ function hitLines(hit: Extract<SessiongraphToolValue, { operation: 'search' }>['
  * @returns the rendered text.
  */
 export function renderSessiongraph(
+  args: RenderArgs,
+  value: SessiongraphToolValue,
+  options: RenderOptions,
+): string {
+  const text = renderValue(args, value, options)
+  return isStale(value) ? `${text}\n${STALE_NOTE}` : text
+}
+
+/**
+ * The per-operation rendering, without the cross-cutting staleness note.
+ * @param args - the validated arguments.
+ * @param value - the canonical value the operation returned.
+ * @param options - rendering caps.
+ * @returns the rendered text.
+ */
+function renderValue(
   args: RenderArgs,
   value: SessiongraphToolValue,
   options: RenderOptions,
@@ -202,6 +228,13 @@ export function renderSessiongraph(
         + `${value.workspaces} 个工作区、${formatBytes(value.bytes)}。最近一次建索引 ${indexedAt}。`
     }
     case 'index': {
+      // A delegated run has no report yet. Saying so, and naming the job that will carry it, is the
+      // whole answer: the model must not read "started" as "indexed" and query an index that is
+      // still being replaced.
+      if ('status' in value) {
+        return `已在后台建索引，jobId=${value.job_id}。可以稍后查 sessiongraph status 看规模；`
+          + `job_output ${value.job_id} 能取这次运行的报告。`
+      }
       const failed = value.failed.length === 0
         ? '没有会话解析失败。'
         : `解析失败 ${value.failed.length} 个：`

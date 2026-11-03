@@ -315,6 +315,14 @@ export interface SessiongraphIndexReport {
   skipped: number
   /** Sessions dropped because their source file disappeared. */
   removed: number
+  /**
+   * Sessions rebuilt from the host's live (still-running) view this run. They belong to no source
+   * file yet, are replayed in full on every run rather than compared by version, and are therefore
+   * not counted in `added`/`updated`/`skipped`.
+   */
+  liveSessions?: number
+  /** Live sessions left out because they exceeded the indexer's configured cap. */
+  liveSkipped?: number
   /** Sessions discovered in total across all source roots. */
   discovered: number
   /** Sessions that failed to parse, with a bounded reason. */
