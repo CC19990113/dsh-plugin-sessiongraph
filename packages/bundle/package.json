@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-sessiongraph-bundle",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Bundle for dsh-plugin-sessiongraph — mounts the local conversation-index capability as one DSH profile layer",
   "keywords": [
     "dsh",
@@ -27,7 +27,7 @@
   ],
   "publishConfig": {
     "access": "public",
-    "provenance": true
+    "provenance": false
   },
   "dependencies": {
     "dsh-plugin-sessiongraph-service": "workspace:^",
