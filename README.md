@@ -99,14 +99,21 @@ dsh plugin add dsh-plugin-sessiongraph
 
 ## Rust 内核
 
-解压 + 解析 1.6GB 的实测对比：
+全量索引（641 会话 / 1.6GB，同机、同数据、热缓存）：
 
-| 实现 | 耗时 |
-|---|---|
-| TypeScript 单核 | **17,635ms** |
-| Rust 8 线程（napi-rs） | **4,082ms**（4.3x） |
+| 引擎 | 全量 | 增量 | 体积 |
+|---|---|---|---|
+| **Rust 原生**（napi-rs + Rayon + rusqlite） | **6.76s** | **59–107ms** | 167.9 MiB |
+| TypeScript 单核 | 19.22s | 179–230ms | 167.9 MiB |
+| | **2.8–2.9×** | **1.7–3.9×** | 一致 |
 
-用 napi-rs 而不是 WASM：内核要直接读文件系统、写 SQLite、吃 1.6GB 数据，WASM 的边界拷贝和 fs/sqlite 缺失是硬伤。原生模块不存在时自动回落 TS 实现。
+**内容一致性**：建表 SQL 逐字相同；639 个未变会话的 session / entry / FTS token 全量比对 **0 差异**；两库 entry 行、session 行、FTS token 多重集的 SHA-256 **相同**；TS store 能直接读 Rust 建的库。
+
+用 napi-rs 而不是 WASM：内核要直接读文件系统、写 SQLite、吃 1.6GB 数据，WASM 的边界拷贝和 fs/sqlite 缺失是硬伤。
+
+**引擎选择**：`engine: 'auto'`（默认）有原生就用、没有静默回落 TS；`'native'` 显式要求但在不可用时回落并报一次错；`'typescript'` 强制走 TS。没有 `.node` 的机器（架构不匹配、没编译）完全等同旧行为。
+
+> 编译注意：本机 rustup 默认是 Rosetta 的 `x86_64` toolchain，产物在 arm64 Node 里加载不了。`packages/native/build-native.sh` 会自动选 `aarch64-apple-darwin` 并用 `file` 校验架构。
 
 ## 开发
 

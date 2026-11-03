@@ -53,6 +53,7 @@ function config(): ResolvedConfig {
     autoIndex: true,
     backgroundIndexThreshold: 1_000,
     maxLiveSessions: 8,
+    engine: 'typescript',
   }
 }
 
@@ -365,7 +366,7 @@ describe('apply', () => {
     await writeDemoSession()
     const ctx = new Context()
     await ctx.plugin(ServicePlugin)
-    await ctx.plugin(SessionsPlugin, { sessionsRoot: fixture.sessionsRoot })
+    await ctx.plugin(SessionsPlugin, { sessionsRoot: fixture.sessionsRoot, engine: 'typescript' })
 
     const seam = (ctx as unknown as { readonly sessiongraph: { index: typeof runIndex } }).sessiongraph
     const report = await seam.index(fixture.indexRoot, {})

@@ -39,6 +39,8 @@ import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { loadNative } from 'dsh-plugin-sessiongraph-native'
+import type { NativeIndexReport, NativeKernel } from 'dsh-plugin-sessiongraph-native'
 import { INDEX_RELATIVE_PATH, SessiongraphIndexerId } from 'dsh-plugin-sessiongraph-service'
 import type {
   SessiongraphIndexer,
@@ -51,7 +53,7 @@ import { parseSessionLog } from './parse.ts'
 import type { ParsedSession } from './parse.ts'
 import { scanSessions } from './scan.ts'
 import { readIndexState, STATUS_RELATIVE_PATH, writeIndex } from './write.ts'
-import type { IndexedSession } from './write.ts'
+import type { IndexedSession, IndexWriteResult } from './write.ts'
 
 export { decompressSessionLog, parseSessionLog } from './parse.ts'
 export type { ParsedEntry, ParsedSession, SessionParseLimits } from './parse.ts'
@@ -91,6 +93,15 @@ export const DEFAULT_BACKGROUND_INDEX_THRESHOLD = 1_000
  * because replaying a live log is not incremental and a host could report many.
  */
 export const DEFAULT_MAX_LIVE_SESSIONS = 8
+
+/** Engine selection: prefer the native kernel, only the TypeScript indexer, or decide per machine. */
+export type SessiongraphEngineSetting = 'auto' | 'native' | 'typescript'
+
+/** Which engine produced one run's report. */
+export type SessiongraphIndexEngine = 'native' | 'typescript'
+
+/** Default engine selection. */
+export const DEFAULT_ENGINE: SessiongraphEngineSetting = 'auto'
 
 /** Default cap on stored message text, in characters. */
 export const DEFAULT_MAX_ENTRY_CHARS = 4_000
@@ -137,6 +148,12 @@ export interface Config {
    * `ctx.sessionQuery` and are always rebuilt in full, so the cap bounds the replay cost.
    */
   maxLiveSessions?: number
+  /**
+   * Which index engine to run (default `auto`): the native Rust kernel when this machine has a
+   * loadable build, else the TypeScript indexer. `native` asks for the kernel explicitly and logs
+   * once when it cannot be used before falling back; `typescript` never probes the kernel at all.
+   */
+  engine?: SessiongraphEngineSetting
 }
 
 export const Config: z<Config> = z.object({
@@ -148,6 +165,7 @@ export const Config: z<Config> = z.object({
   autoIndex: z.boolean().default(true),
   backgroundIndexThreshold: z.number().default(DEFAULT_BACKGROUND_INDEX_THRESHOLD),
   maxLiveSessions: z.number().default(DEFAULT_MAX_LIVE_SESSIONS),
+  engine: z.union([z.const('auto'), z.const('native'), z.const('typescript')]).default(DEFAULT_ENGINE),
 })
 
 /** Configuration after the schema filled in every default. */
@@ -575,6 +593,162 @@ function expandHome(path: string): string {
 }
 
 /**
+ * The engine a run should try first, or `undefined` when it must use the TypeScript indexer.
+ *
+ * `loadNative` promises never to throw — an absent or foreign-architecture binary is a normal state —
+ * but the boundary stays: a loader bug must degrade to the TypeScript engine instead of taking the
+ * whole indexer down on a machine that would otherwise work.
+ * @param setting - the configured engine.
+ * @returns the kernel, or undefined when this run must use the TypeScript path.
+ */
+function resolveNativeEngine(setting: SessiongraphEngineSetting): NativeKernel | undefined {
+  if (setting === 'typescript') return undefined
+  try {
+    return loadNative()
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Run one index through the native kernel, then apply the live-session pass on top.
+ *
+ * The kernel is synchronous and covers the file path only — it has no access to the host's
+ * `sessionQuery`, so its report always says zero live sessions. The live pass is therefore shared
+ * with the TypeScript path and its numbers overwrite the kernel's.
+ * @param native - the loaded kernel.
+ * @param indexPath - absolute path of the index file.
+ * @param options - scope and rebuild switches.
+ * @param config - the resolved plugin configuration.
+ * @param inScope - whether a session is in the run's scope.
+ * @param ctx - the plugin context, consulted for the optional live-session source.
+ * @param signal - aborts before the kernel starts.
+ * @param startedAt - epoch milliseconds the run started, for `elapsedMs`.
+ * @returns the run's report, or undefined when the kernel failed and the caller should fall back.
+ */
+async function runNativeEngine(
+  native: NativeKernel,
+  indexPath: string,
+  options: SessiongraphIndexOptions,
+  config: ResolvedConfig,
+  inScope: (workspace: string, sessionId: string) => boolean,
+  ctx: Context | undefined,
+  signal: AbortSignal | undefined,
+  startedAt: number,
+): Promise<SessiongraphIndexReport | undefined> {
+  let nativeReport: NativeIndexReport
+  try {
+    signal?.throwIfAborted()
+    nativeReport = native.indexSessions({
+      sessionsRoot: config.sessionsRoot,
+      indexPath,
+      ...(options.force === undefined ? {} : { force: options.force }),
+      ...(options.workspace === undefined ? {} : { workspaceFilter: options.workspace }),
+      ...(options.sessionId === undefined ? {} : { sessionFilter: options.sessionId }),
+      maxEntryChars: config.maxEntryChars,
+      toolCallChars: config.toolCallChars,
+      maxFileBytes: config.maxFileBytes,
+    })
+  } catch (error) {
+    // A binary built for another ABI, a corrupt previous index the kernel refuses, or a write it
+    // could not finish: the TypeScript path below is the fallback, and it starts from whatever the
+    // previous index left behind.
+    console.error(
+      `sessiongraph-sessions: native index failed, falling back to the TypeScript engine: ${describeError(error)}`,
+    )
+    return undefined
+  }
+
+  const live = await runLivePass(ctx, indexPath, config, inScope, {
+    discovered: nativeReport.discovered,
+    failed: nativeReport.failed.length,
+    indexedAt: Date.now(),
+  })
+  return {
+    indexPath: nativeReport.indexPath,
+    added: nativeReport.added,
+    updated: nativeReport.updated,
+    skipped: nativeReport.skipped,
+    removed: nativeReport.removed,
+    liveSessions: live.liveSessions,
+    liveSkipped: live.liveSkipped,
+    discovered: nativeReport.discovered,
+    failed: nativeReport.failed,
+    entries: live.totals?.entries ?? nativeReport.entries,
+    sessions: live.totals?.sessions ?? nativeReport.sessions,
+    workspaces: live.totals?.workspaces ?? nativeReport.workspaces,
+    bytes: live.totals?.bytes ?? nativeReport.bytes,
+    elapsedMs: Date.now() - startedAt,
+    engine: 'native',
+  }
+}
+
+/** What the shared live-session pass contributed to a run. */
+interface LivePassOutcome {
+  /** Live sessions rebuilt this run. */
+  readonly liveSessions: number
+  /** Live sessions left out by {@link Config.maxLiveSessions}. */
+  readonly liveSkipped: number
+  /** Final totals when the pass wrote rows; undefined when it wrote nothing. */
+  readonly totals: IndexWriteResult | undefined
+}
+
+/** A live pass that found nothing, or failed and was skipped. */
+const EMPTY_LIVE_PASS: LivePassOutcome = { liveSessions: 0, liveSkipped: 0, totals: undefined }
+
+/**
+ * Rebuild the host's live sessions on top of an already-committed file-path index.
+ *
+ * Runs in its own transaction after the file path has committed, because a replay reads a whole
+ * in-memory log and can be slow — the file results must already be durable before it starts, and a
+ * failure here must not roll them back. Shared by both engines: the native kernel cannot see live
+ * sessions, and the TypeScript path must not grow a second copy of this logic.
+ * @param ctx - the plugin context, consulted for the optional `sessionQuery` service.
+ * @param indexPath - absolute path of the index file.
+ * @param config - the resolved plugin configuration.
+ * @param inScope - whether a session is in the run's scope.
+ * @param provenance - this run's discovery counts, for the `meta` rows the live write refreshes.
+ * @returns the live counts and, when rows were written, the index's new totals.
+ */
+async function runLivePass(
+  ctx: Context | undefined,
+  indexPath: string,
+  config: ResolvedConfig,
+  inScope: (workspace: string, sessionId: string) => boolean,
+  provenance: { readonly discovered: number; readonly failed: number; readonly indexedAt: number },
+): Promise<LivePassOutcome> {
+  const sessionQuery = ctx?.get('sessionQuery') as SessionQueryService | undefined
+  // `ctx.get` rather than an `inject` entry: a host without the service keeps the file-path index.
+  if (sessionQuery === undefined) return EMPTY_LIVE_PASS
+  try {
+    const live = await collectLiveSessions(sessionQuery, {
+      maxLiveSessions: config.maxLiveSessions,
+      limits: { maxEntryChars: config.maxEntryChars, toolCallChars: config.toolCallChars },
+      inScope,
+    })
+    if (live.sessions.length === 0) {
+      return { liveSessions: 0, liveSkipped: live.skipped, totals: undefined }
+    }
+    const totals = writeIndex({
+      indexPath,
+      force: false,
+      preserveExisting: false,
+      sessions: live.sessions,
+      removed: [],
+      discovered: provenance.discovered,
+      failed: provenance.failed,
+      indexedAt: provenance.indexedAt,
+    })
+    return { liveSessions: live.sessions.length, liveSkipped: live.skipped, totals }
+  } catch (error) {
+    // An older kernel, a failed persistence read, or a write conflict: the file-path index is
+    // complete and committed, so the run degrades rather than failing.
+    console.error(`sessiongraph-sessions: live session indexing skipped: ${describeError(error)}`)
+    return EMPTY_LIVE_PASS
+  }
+}
+
+/**
  * Build or refresh one index.
  * @param indexRoot - directory to write `index.db` into.
  * @param options - scope and rebuild switches.
@@ -593,6 +767,25 @@ export async function runIndex(
 ): Promise<SessiongraphIndexReport> {
   const startedAt = Date.now()
   const indexPath = join(indexRoot, INDEX_RELATIVE_PATH)
+  const workspaceFilter = options.workspace
+  const sessionFilter = options.sessionId
+  const scoped = workspaceFilter !== undefined || sessionFilter !== undefined
+  const inScope = (workspace: string, id: string): boolean =>
+    matchesWorkspace(workspaceFilter, workspace) && matchesSession(sessionFilter, id)
+
+  // `auto` prefers the kernel and falls back silently; `native` asks for it explicitly, so a machine
+  // without a usable build is told why it got TypeScript results instead.
+  const native = resolveNativeEngine(config.engine)
+  if (native !== undefined) {
+    const nativeReport = await runNativeEngine(native, indexPath, options, config, inScope, ctx, signal, startedAt)
+    if (nativeReport !== undefined) return nativeReport
+  } else if (config.engine === 'native') {
+    console.error(
+      'sessiongraph-sessions: the native index engine is unavailable on this machine; ' +
+      'falling back to the TypeScript engine',
+    )
+  }
+
   const files = await scanSessions(config.sessionsRoot)
   signal?.throwIfAborted()
 
@@ -600,11 +793,6 @@ export async function runIndex(
   // A missing or unusable previous index is rebuilt through the temporary file too, so a corrupt or
   // schema-mismatched file is replaced atomically instead of being written into.
   const force = options.force === true || previous === undefined
-  const workspaceFilter = options.workspace
-  const sessionFilter = options.sessionId
-  const scoped = workspaceFilter !== undefined || sessionFilter !== undefined
-  const inScope = (workspace: string, id: string): boolean =>
-    matchesWorkspace(workspaceFilter, workspace) && matchesSession(sessionFilter, id)
 
   const failed: { path: string; reason: string }[] = []
   const candidates: IndexedSession[] = []
@@ -663,7 +851,7 @@ export async function runIndex(
 
   signal?.throwIfAborted()
   const indexedAt = Date.now()
-  let outcome = writeIndex({
+  const outcome = writeIndex({
     indexPath,
     force,
     preserveExisting: force && scoped && previous !== undefined,
@@ -674,41 +862,11 @@ export async function runIndex(
     indexedAt,
   })
 
-  // The live pass runs after the file-path transaction committed, in a transaction of its own. A
-  // replay reads the whole in-memory log and can be slow; the file results must already be durable
-  // before it starts, and a failure here must not roll them back.
-  let liveSessions = 0
-  let liveSkipped = 0
-  const sessionQuery = ctx?.get('sessionQuery') as SessionQueryService | undefined
-  if (sessionQuery !== undefined) {
-    try {
-      const live = await collectLiveSessions(sessionQuery, {
-        maxLiveSessions: config.maxLiveSessions,
-        limits: { maxEntryChars: config.maxEntryChars, toolCallChars: config.toolCallChars },
-        inScope,
-      })
-      liveSessions = live.sessions.length
-      liveSkipped = live.skipped
-      if (live.sessions.length > 0) {
-        outcome = writeIndex({
-          indexPath,
-          force: false,
-          preserveExisting: false,
-          sessions: live.sessions,
-          removed: [],
-          discovered: files.length,
-          failed: failed.length,
-          indexedAt,
-        })
-      }
-    } catch (error) {
-      // A host without the service, an older kernel, or a failed persistence read: the file-path
-      // index is complete and committed, so the run degrades instead of failing.
-      liveSessions = 0
-      liveSkipped = 0
-      console.error(`sessiongraph-sessions: live session indexing skipped: ${describeError(error)}`)
-    }
-  }
+  const live = await runLivePass(ctx, indexPath, config, inScope, {
+    discovered: files.length,
+    failed: failed.length,
+    indexedAt,
+  })
 
   return {
     indexPath,
@@ -716,15 +874,16 @@ export async function runIndex(
     updated,
     skipped,
     removed: removed.length,
-    liveSessions,
-    liveSkipped,
+    liveSessions: live.liveSessions,
+    liveSkipped: live.liveSkipped,
     discovered: files.length,
     failed,
-    entries: outcome.entries,
-    sessions: outcome.sessions,
-    workspaces: outcome.workspaces,
-    bytes: outcome.bytes,
+    entries: live.totals?.entries ?? outcome.entries,
+    sessions: live.totals?.sessions ?? outcome.sessions,
+    workspaces: live.totals?.workspaces ?? outcome.workspaces,
+    bytes: live.totals?.bytes ?? outcome.bytes,
     elapsedMs: Date.now() - startedAt,
+    engine: 'typescript',
   }
 }
 

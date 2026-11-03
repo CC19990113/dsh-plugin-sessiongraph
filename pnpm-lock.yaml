@@ -84,6 +84,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: ^3.18.1
         version: 3.18.5
+      dsh-plugin-sessiongraph-native:
+        specifier: workspace:^
+        version: link:../native
       dsh-plugin-sessiongraph-service:
         specifier: workspace:^
         version: link:../service

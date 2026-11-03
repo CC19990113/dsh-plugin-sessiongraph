@@ -42,6 +42,7 @@ function config(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     autoIndex: false,
     backgroundIndexThreshold: 1_000,
     maxLiveSessions: 8,
+    engine: 'typescript',
     ...overrides,
   }
 }

@@ -10,5 +10,5 @@
     "tsBuildInfoFile": "./lib/.tsbuildinfo"
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../service" }]
+  "references": [{ "path": "../service" }, { "path": "../native" }]
 }

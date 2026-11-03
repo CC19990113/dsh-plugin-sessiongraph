@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-sessiongraph-sessions",
   "version": "0.1.0",
-  "description": "Session-log indexer for DeepSeek Harness \u2014 scans ~/.dsh/sessions, decompresses the multi-frame zstd JSONL logs and writes the sessiongraph SQLite index the store reads",
+  "description": "Session-log indexer for DeepSeek Harness — scans ~/.dsh/sessions, decompresses the multi-frame zstd JSONL logs and writes the sessiongraph SQLite index the store reads",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -49,7 +49,8 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
-    "dsh-plugin-sessiongraph-service": "workspace:^"
+    "dsh-plugin-sessiongraph-service": "workspace:^",
+    "dsh-plugin-sessiongraph-native": "workspace:^"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.1",

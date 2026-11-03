@@ -330,6 +330,11 @@ export interface SessiongraphIndexReport {
   liveSessions?: number
   /** Live sessions left out because they exceeded the indexer's configured cap. */
   liveSkipped?: number
+  /**
+   * Engine that produced this run's totals: the native Rust kernel or the TypeScript indexer. Absent
+   * on reports from a build that predates engine selection.
+   */
+  engine?: 'native' | 'typescript'
   /** Sessions discovered in total across all source roots. */
   discovered: number
   /** Sessions that failed to parse, with a bounded reason. */
