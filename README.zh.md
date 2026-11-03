@@ -64,7 +64,7 @@
 |---|---|
 | **模型自主调用** | 直接问「上次讨论鸿蒙开屏是哪个会话」，模型自己调 `sessiongraph` |
 | **斜杠命令** | `/sessiongraph status` / `index` / `search <词>` / `workspaces` |
-| **命令结果回灌** | 敲完命令，结果作为 `plugin/notice` 消息注入会话 —— 模型下一轮就知道你查了什么（与 `/plan` 同一机制） |
+| **命令结果回灌**（可选，默认关） | 设 `injectCommandResults: true` 后，命令结果作为 `plugin/notice` 消息注入会话，模型下一轮就知道你查了什么（与 `/plan` 同一机制）。默认关是因为命令跑在宿主主线程上，在 handler 里调 `agent.inject` 会把 agent 循环拖进同一个栈 —— `/sessiongraph status` 曾因此卡死桌面 |
 
 ### 工具
 

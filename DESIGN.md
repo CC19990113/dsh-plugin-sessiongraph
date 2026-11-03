@@ -235,3 +235,11 @@ DSH 内核已经有一整套会话查询设施，能用的直接用：
 3. 重建或重试仍失败才把原始错误抛给模型
 
 索引是派生数据，源日志没动过，所以重建永远安全；这也是人看到那个错误后会做的事，只是不需要人来点。
+
+## 14. 命令平面跑在宿主主线程上
+
+`/sessiongraph <cmd>` 的 handler 在宿主主线程执行，任何同步工作都会直接卡住 UI。踩过一次：handler 返回后调 `agent.inject` 把结果塞回会话，结果 `agent.inject` 把 agent 循环（prompt 装配，连带 section 里每次同步读 `status.json`）带进同一个调用栈，`/sessiongraph status` 直接把桌面卡死，主进程 CPU 约 48%。
+
+现在 `injectCommandResults` 默认 **false**：命令照常执行并显示结果，不再往会话里塞消息。要用显式设 true，并且清楚代价。
+
+由此得出的约束：**命令 handler 里只做短小的异步工作**。`statusCommand` 走的是 `ctx.sessiongraph.query`（同步 SQLite 读，单次），这条路径本身没问题；出问题的是在 handler 里间接驱动 agent 循环。

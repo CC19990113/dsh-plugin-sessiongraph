@@ -64,7 +64,7 @@ Memory does not overlap with either: a conversation may **never enter memory** (
 |---|---|
 | **The model calls it** | Just ask "which session discussed the splash screen"; it reaches for `sessiongraph` |
 | **Slash command** | `/sessiongraph status` / `index` / `search <term>` / `workspaces` |
-| **Command results flow back** | After the command runs, its result is injected into the conversation as a `plugin/notice` message, so the model's next turn knows what you looked up — the same mechanism `/plan` uses |
+| **Command results flow back** (opt-in, off by default) | With `injectCommandResults: true` the command's result is injected into the conversation as a `plugin/notice` message, so the model's next turn knows what you looked up — the same mechanism `/plan` uses. Off by default because commands run on the host's main thread, and calling `agent.inject` from a handler drags the agent loop onto that stack: `/sessiongraph status` hung the desktop that way |
 
 ### Tools
 
