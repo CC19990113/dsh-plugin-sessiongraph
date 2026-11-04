@@ -7,7 +7,11 @@ on:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    # macOS, not ubuntu: `packages/native` ships the kernel as a committed-nowhere binary built by
+    # `build-native.sh`, and npm packs whatever is on disk. On ubuntu that file never existed, so every
+    # release so far carried an empty native package — users silently got the synchronous TypeScript
+    # indexer, which is the slow path this whole package exists to avoid.
+    runs-on: macos-latest
     permissions:
       # Deliberately NOT `id-token: write`. pnpm 11 tries OIDC trusted
       # publishing whenever that permission is granted, the exchange fails on a
@@ -19,6 +23,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v4
@@ -26,6 +32,10 @@ jobs:
           node-version: 22
           cache: pnpm
           registry-url: https://registry.npmjs.org
+
+      - name: Build the native kernel
+        run: ./build-native.sh
+        working-directory: packages/native
 
       - run: pnpm install --frozen-lockfile
 
