@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use napi::{bindgen_prelude::AsyncTask, Env, Task};
 use napi_derive::napi;
 use rayon::prelude::*;
 
@@ -40,6 +41,7 @@ const MAX_REASON_CHARS: usize = 200;
 ///
 /// Field names are snake_case here and camelCase in JS (`sessionsRoot`, `indexPath`, …).
 #[napi(object)]
+#[derive(Clone)]
 pub struct IndexOptions {
     /// Directory the harness writes its session logs to (`~/.dsh/sessions`).
     pub sessions_root: String,
@@ -113,13 +115,34 @@ pub struct IndexReport {
     pub elapsed_ms: f64,
 }
 
-/// Build or refresh one index, synchronously.
+/// One pending index run, executed on libuv's thread pool.
 ///
-/// Blocking on purpose: it matches the TS indexer's synchronous write path and the caller
-/// (`sessiongraph_index`) already runs it on its own timeout budget.
+/// The body used to be synchronous on purpose — "the caller already runs it on its own timeout
+/// budget" — which answered the wrong question. A `Sync` napi call holds the JavaScript thread for
+/// its whole duration, so a run scheduled through the host's job registry *still* froze the UI:
+/// measured at 1294 ms of dead event loop on one 17 MB session log, from a corpus of 856 sessions /
+/// 642 MB. `AsyncTask` is what makes "in the background" mean what it says.
+pub struct IndexTask {
+    options: IndexOptions,
+}
+
+impl Task for IndexTask {
+    type Output = IndexReport;
+    type JsValue = IndexReport;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        run_index(self.options.clone()).map_err(napi::Error::from_reason)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// Build or refresh one index, off the JavaScript thread.
 #[napi]
-pub fn index_sessions(options: IndexOptions) -> napi::Result<IndexReport> {
-    run_index(options).map_err(napi::Error::from_reason)
+pub fn index_sessions(options: IndexOptions) -> AsyncTask<IndexTask> {
+    AsyncTask::new(IndexTask { options })
 }
 
 /// Options after defaults and path resolution.

@@ -134,7 +134,7 @@ describe('loadNative', () => {
 describe('native index kernel', () => {
   it.skipIf(kernel === undefined)('writes the shared schema and a matching status sidecar', async () => {
     await seedFixture()
-    const report = kernel!.indexSessions({ sessionsRoot, indexPath })
+    const report = await kernel!.indexSessions({ sessionsRoot, indexPath })
 
     // camelCase is what napi-rs produces from the Rust snake_case fields; the loader's types and
     // the seam's SessiongraphIndexReport both rely on it.
@@ -218,10 +218,10 @@ describe('native index kernel', () => {
 
   it.skipIf(kernel === undefined)('is incremental and re-writes only changed sources', async () => {
     const files = await seedFixture()
-    const first = kernel!.indexSessions({ sessionsRoot, indexPath })
+    const first = await kernel!.indexSessions({ sessionsRoot, indexPath })
     expect(first.added).toBe(3)
 
-    const second = kernel!.indexSessions({ sessionsRoot, indexPath })
+    const second = await kernel!.indexSessions({ sessionsRoot, indexPath })
     expect(second.added).toBe(0)
     expect(second.updated).toBe(0)
     expect(second.skipped).toBe(3)
@@ -236,7 +236,7 @@ describe('native index kernel', () => {
         ),
       ),
     )
-    const third = kernel!.indexSessions({ sessionsRoot, indexPath })
+    const third = await kernel!.indexSessions({ sessionsRoot, indexPath })
     expect(third.updated).toBe(1)
     expect(third.skipped).toBe(2)
     expect(third.sessions).toBe(3)
@@ -246,10 +246,10 @@ describe('native index kernel', () => {
 
   it.skipIf(kernel === undefined)('removes sessions whose source file disappeared', async () => {
     const files = await seedFixture()
-    kernel!.indexSessions({ sessionsRoot, indexPath })
+    await kernel!.indexSessions({ sessionsRoot, indexPath })
 
     await rm(files.c)
-    const report = kernel!.indexSessions({ sessionsRoot, indexPath })
+    const report = await kernel!.indexSessions({ sessionsRoot, indexPath })
     expect(report.discovered).toBe(2)
     expect(report.removed).toBe(1)
     expect(report.sessions).toBe(2)
@@ -266,9 +266,9 @@ describe('native index kernel', () => {
 
   it.skipIf(kernel === undefined)('force rebuilds through index.db.tmp and keeps out-of-scope rows', async () => {
     await seedFixture()
-    kernel!.indexSessions({ sessionsRoot, indexPath })
+    await kernel!.indexSessions({ sessionsRoot, indexPath })
 
-    const report = kernel!.indexSessions({
+    const report = await kernel!.indexSessions({
       sessionsRoot,
       indexPath,
       force: true,
@@ -299,7 +299,7 @@ describe('native index kernel', () => {
       { type: 'tool/call', seq: 2, time: 2, data: { name: 'tool', arguments: long } },
     ])
 
-    const report = kernel!.indexSessions({ sessionsRoot, indexPath, maxEntryChars: 20, toolCallChars: 10 })
+    const report = await kernel!.indexSessions({ sessionsRoot, indexPath, maxEntryChars: 20, toolCallChars: 10 })
     expect(report.entries).toBe(2)
 
     const database = openIndex()
@@ -315,7 +315,7 @@ describe('native index kernel', () => {
     }
 
     // A log larger than the cap is reported, not parsed, and the run still writes a valid index.
-    const capped = kernel!.indexSessions({ sessionsRoot, indexPath, force: true, maxFileBytes: 10 })
+    const capped = await kernel!.indexSessions({ sessionsRoot, indexPath, force: true, maxFileBytes: 10 })
     expect(capped.failed).toHaveLength(1)
     expect(capped.failed[0]!.reason).toContain('maxFileBytes')
     expect(capped.failed[0]!.reason.length).toBeLessThanOrEqual(200)
@@ -336,7 +336,7 @@ describe('native index kernel', () => {
       humanMessage(1, 1, 'newer copy'),
     ])
 
-    const report = kernel!.indexSessions({ sessionsRoot, indexPath })
+    const report = await kernel!.indexSessions({ sessionsRoot, indexPath })
     expect(report.discovered).toBe(2)
     expect(report.sessions).toBe(1)
     expect(report.entries).toBe(1)
@@ -356,10 +356,10 @@ describe('native index kernel', () => {
 
   it.skipIf(kernel === undefined)('preserves live rows written by the caller\'s live pass', async () => {
     await seedFixture()
-    kernel!.indexSessions({ sessionsRoot, indexPath })
+    await kernel!.indexSessions({ sessionsRoot, indexPath })
     seedLiveRow('live-session-1', '实时会话里的广告改动')
 
-    const report = kernel!.indexSessions({ sessionsRoot, indexPath })
+    const report = await kernel!.indexSessions({ sessionsRoot, indexPath })
     // A file scan cannot see a live session, so "not in this scan" must not delete it.
     expect(report.removed).toBe(0)
     expect(report.skipped).toBe(3)
@@ -381,7 +381,7 @@ describe('native index kernel', () => {
   })
 
   it.skipIf(kernel === undefined)('treats a missing sessions root as an empty index', async () => {
-    const report = kernel!.indexSessions({ sessionsRoot: join(work, 'never-existed'), indexPath })
+    const report = await kernel!.indexSessions({ sessionsRoot: join(work, 'never-existed'), indexPath })
     expect(report.discovered).toBe(0)
     expect(report.sessions).toBe(0)
     expect(report.entries).toBe(0)

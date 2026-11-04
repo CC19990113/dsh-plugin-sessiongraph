@@ -82,12 +82,16 @@ export interface NativeIndexReport {
 /** The loaded native module's surface. */
 export interface NativeKernel {
   /**
-   * Build or refresh one index, synchronously.
+   * Build or refresh one index, off the JavaScript thread.
+   *
+   * Answers a promise because the kernel's body runs on libuv's thread pool. It used to be a
+   * synchronous export — which held the host's event loop for the whole run and froze the UI even
+   * though the call arrived through the job registry, measured at 1294 ms on one 17 MB session log.
    * @param options - roots and scope switches.
    * @returns what the run did.
    * @throws when the index cannot be written; parse failures are reported, not thrown.
    */
-  indexSessions(options: NativeIndexOptions): NativeIndexReport
+  indexSessions(options: NativeIndexOptions): Promise<NativeIndexReport>
 }
 
 /** `undefined` until the first {@link loadNative} call, then the kernel or `null` when absent. */

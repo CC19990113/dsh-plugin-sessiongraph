@@ -660,7 +660,7 @@ async function runNativeEngine(
   let nativeReport: NativeIndexReport
   try {
     signal?.throwIfAborted()
-    nativeReport = native.indexSessions({
+    nativeReport = await native.indexSessions({
       sessionsRoot: config.sessionsRoot,
       indexPath,
       ...(options.force === undefined ? {} : { force: options.force }),
