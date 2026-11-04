@@ -1,2 +1,7 @@
 packages:
   - 'packages/*'
+minimumReleaseAgeExclude:
+  - dsh-plugin-sessiongraph-indexer-darwin-arm64@0.1.20
+  - dsh-plugin-sessiongraph-indexer-darwin-x64@0.1.20
+  - dsh-plugin-sessiongraph-indexer-linux-arm64-gnu@0.1.20
+  - dsh-plugin-sessiongraph-indexer-linux-x64-gnu@0.1.20
