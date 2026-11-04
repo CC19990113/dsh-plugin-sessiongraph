@@ -167,6 +167,26 @@ describe('automatic index on session creation', () => {
     expect(existsSync(join(fixture.indexRoot, SessionsPlugin.STATUS_RELATIVE_PATH))).toBe(true)
   })
 
+  it('refreshes again once the auto-index window has passed', async () => {
+    // 索引的意义是「刚说的话也查得到」。进程内只跑一次，桌面开几天后就落后一整天；
+    // 改成时间窗口后，窗口内吸收 burst，窗口外下一次会话就刷新。
+    await writeSessionLog()
+    await buildIndex()
+    const { started, jobs } = fakeJobs()
+    const ctx = await mount({ jobs, config: { autoIndexMinIntervalMs: 50 } })
+
+    emitAgentCreated(ctx, '/Users/admin/www/demo')
+    expect(started).toHaveLength(1)
+    // 窗口内再开一个会话：同一个 root 不重复排
+    emitAgentCreated(ctx, '/Users/admin/www/demo')
+    expect(started).toHaveLength(1)
+
+    // 过了窗口：下一次会话触发刷新
+    await new Promise(resolve => setTimeout(resolve, 80))
+    emitAgentCreated(ctx, '/Users/admin/www/demo')
+    expect(started).toHaveLength(2)
+  })
+
   it('builds the first index in the background when none exists', async () => {
     await writeSessionLog()
     const { started, jobs } = fakeJobs()

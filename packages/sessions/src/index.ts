@@ -140,6 +140,15 @@ export interface Config {
    */
   autoIndex?: boolean
   /**
+   * Shortest gap between two automatic refreshes of one index root, in milliseconds (default 60000).
+   *
+   * The window exists to absorb a burst of session creations into one run — opening five sessions at
+   * once must not queue five index jobs. Past it, the next session refreshes, which is what keeps the
+   * index current while the desktop stays up: an incremental run against a warm index takes tens of
+   * milliseconds and does not block the UI.
+   */
+  autoIndexMinIntervalMs?: number
+  /**
    * Build the very first index automatically in the background when a session starts (default
    * true). The first build reads every log on the machine and can take seconds to minutes, so it
    * runs as a host background job and never blocks session creation. Set false to require an
@@ -178,6 +187,7 @@ export const Config: z<Config> = z.object({
   toolCallChars: z.number().default(DEFAULT_TOOL_CALL_CHARS),
   maxFileBytes: z.number().default(DEFAULT_MAX_FILE_BYTES),
   autoIndex: z.boolean().default(true),
+  autoIndexMinIntervalMs: z.number().default(60_000),
   autoBuild: z.boolean().default(true),
   indexLockStaleMs: z.number().default(300_000),
   backgroundIndexThreshold: z.number().default(DEFAULT_BACKGROUND_INDEX_THRESHOLD),
@@ -205,9 +215,11 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   const indexer = createIndexer(ctx, resolved)
-  // Process-local, private to this plugin instance: a root is auto-refreshed at most once per
-  // process, so a burst of session creations cannot queue a burst of index runs.
-  const autoIndexed = new Set<string>()
+  // Process-local, private to this plugin instance: when this root last had an automatic refresh.
+  // A time window rather than "once per process": the whole point of the index is that what was just
+  // said is findable, and "once until restart" stopped being enough the moment the desktop stayed up
+  // for days. The window still absorbs a burst of session creations into one run.
+  const autoIndexRuns = new Map<string, number>()
   // `agent/created` is typed by the host's agent service; this package reads only the two fields it
   // needs through a structural face rather than depending on that package.
   const agentEvents = ctx as unknown as AgentLifecycleContext
@@ -215,7 +227,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(function* () {
     if (resolved.autoIndex) {
       yield agentEvents.on('agent/created', payload => {
-        scheduleAutoIndex(ctx, resolved, autoIndexed, payload)
+        scheduleAutoIndex(ctx, resolved, autoIndexRuns, payload)
       })
     }
     yield ctx.sessiongraph.registerIndexer(indexer)
@@ -361,13 +373,13 @@ export function isBackgroundIndexReport(report: SessiongraphIndexReport): report
  * only decides whether a refresh is warranted and hands one to the host's job registry.
  * @param ctx - the plugin context, consulted for the optional job registry.
  * @param config - the resolved plugin configuration.
- * @param autoIndexed - index roots this process has already scheduled a refresh for.
+ * @param autoIndexRuns - when each root last had an automatic refresh, in epoch milliseconds.
  * @param payload - the `agent/created` dispatch payload.
  */
 function scheduleAutoIndex(
   ctx: Context,
   config: ResolvedConfig,
-  autoIndexed: Set<string>,
+  autoIndexRuns: Map<string, number>,
   payload: AgentCreatedPayload,
 ): void {
   try {
@@ -376,8 +388,12 @@ function scheduleAutoIndex(
     // A session created without a workspace is not an occasion to touch a machine-wide index.
     if (agent === undefined || workspace === undefined || workspace === '') return
     const indexRoot = expandHome(config.indexRoot)
-    // Once per root per process: a burst of session creations must not queue a burst of index runs.
-    if (autoIndexed.has(indexRoot)) return
+    const now = Date.now()
+    // Within the window, a burst of session creations must not queue a burst of index runs. Past it,
+    // the next session refreshes: sessions written since the last run are exactly what an incremental
+    // index exists to pick up, and it costs tens of milliseconds against a warm cache.
+    const previous = autoIndexRuns.get(indexRoot)
+    if (previous !== undefined && now - previous < config.autoIndexMinIntervalMs) return
     // A first build reads every log on the machine and can take a while, so it stays a background
     // job like the incremental refresh. `autoBuild: false` restores the stricter behaviour where
     // nothing becomes searchable until someone asks for it.
@@ -398,7 +414,7 @@ function scheduleAutoIndex(
     })
     // Marked only after the registry accepted the job, so a refusal leaves the root eligible for
     // the next session that opens.
-    autoIndexed.add(indexRoot)
+    autoIndexRuns.set(indexRoot, now)
   } catch (error) {
     // A throwing listener would veto publication of the agent. Losing a refresh is a degradation,
     // never a reason to stop a session from starting; report once and carry on.
