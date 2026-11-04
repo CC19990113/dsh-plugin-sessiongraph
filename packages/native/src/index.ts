@@ -134,12 +134,43 @@ export function loadNative(): NativeKernel | undefined {
  */
 function candidateSpecifiers(): string[] {
   const platform = `${process.platform}-${process.arch}`
+  const fromPackage = indexerPackageName(process.platform, process.arch)
   return [
+    // A binary beside this module: what `build-native.sh` produces locally, and what earlier
+    // releases shipped inside this package itself.
     `../sessiongraph-core.${platform}.node`,
     `../dsh-plugin-sessiongraph-native.${platform}.node`,
     `dsh-plugin-sessiongraph-native-${platform}`,
+    // The published one-per-platform package (an optional dependency of this one). Asked for by name
+    // rather than by path: only module resolution knows where a dependency actually landed.
+    ...fromPackage === undefined ? [] : [fromPackage],
     '../sessiongraph-core.node',
   ]
+}
+
+/**
+ * The optional platform package that carries this platform's kernel, if the project publishes one.
+ * @param platform - `process.platform`.
+ * @param arch - `process.arch`.
+ * @returns the package name, or `undefined` for a platform with no published build.
+ */
+export function indexerPackageName(platform: string, arch: string): string | undefined {
+  const suffix = INDEXER_PACKAGES[`${platform}-${arch}`]
+  return suffix === undefined ? undefined : `dsh-plugin-sessiongraph-indexer-${suffix}`
+}
+
+/**
+ * Suffix each published platform package carries, keyed by `platform-arch`.
+ *
+ * Not mechanical: the Linux builds are `-gnu` because a musl build would be a separate artifact, and
+ * Windows spells its ABI out. An explicit table keeps this from computing a name nobody publishes.
+ */
+const INDEXER_PACKAGES: Record<string, string> = {
+  'darwin-arm64': 'darwin-arm64',
+  'darwin-x64': 'darwin-x64',
+  'linux-x64': 'linux-x64-gnu',
+  'linux-arm64': 'linux-arm64-gnu',
+  'win32-x64': 'win32-x64-msvc',
 }
 
 /**

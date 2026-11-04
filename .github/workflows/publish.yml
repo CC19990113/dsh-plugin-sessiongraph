@@ -6,12 +6,52 @@ on:
   workflow_dispatch:
 
 jobs:
+  # One kernel per platform, each built on a runner that can produce it. The publish job below names
+  # them as optional dependencies, so they must exist on the registry before it installs.
+  build-native:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: darwin-arm64
+          # Intel macOS, cross-compiled on the arm64 runner: `macos-13` is the last Intel image and
+          # can sit queued for many minutes, which blocks the whole release.
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            suffix: darwin-x64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            suffix: linux-x64-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            suffix: linux-arm64-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: win32-x64-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build the kernel for ${{ matrix.suffix }}
+        shell: bash
+        working-directory: packages/native
+        run: ./build-native.sh
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.suffix }}
+          path: crates/sessiongraph-core/npm/${{ matrix.suffix }}/*.node
+          if-no-files-found: error
+
   publish:
-    # macOS, not ubuntu: `packages/native` ships the kernel as a committed-nowhere binary built by
-    # `build-native.sh`, and npm packs whatever is on disk. On ubuntu that file never existed, so every
-    # release so far carried an empty native package — users silently got the synchronous TypeScript
-    # indexer, which is the slow path this whole package exists to avoid.
-    runs-on: macos-latest
+    needs: build-native
+    # ubuntu is fine here: the kernel arrives as a downloaded artifact, not as a build output.
+    runs-on: ubuntu-latest
     permissions:
       # Deliberately NOT `id-token: write`. pnpm 11 tries OIDC trusted
       # publishing whenever that permission is granted, the exchange fails on a
@@ -23,8 +63,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-
       - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v4
@@ -33,11 +71,56 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
-      - name: Build the native kernel
-        run: ./build-native.sh
-        working-directory: packages/native
+      - uses: actions/download-artifact@v4
+        with:
+          path: native-artifacts
 
-      - run: pnpm install --frozen-lockfile
+      - name: Place the kernels into their platform packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The artifact name carries the `native-` tag it was uploaded under; the package directory
+          # does not. Stripping it keeps the two from being confused.
+          for dir in native-artifacts/*/; do
+            name="$(basename "$dir")"
+            suffix="${name#native-}"
+            cp "$dir"*.node "crates/sessiongraph-core/npm/$suffix/"
+          done
+          for pkg in crates/sessiongraph-core/npm/*/; do
+            count=$(find "$pkg" -maxdepth 1 -name '*.node' | wc -l)
+            echo "$pkg -> $count binary(ies)"
+            if [ "$count" -ne 1 ]; then
+              echo "::warning::$pkg has no binary and will not be published; that platform falls back to the TypeScript indexer"
+            fi
+          done
+
+      # Platform packages first: the native package names them as optional dependencies, so a frozen
+      # install cannot resolve until they exist. An artifact-less platform is skipped rather than
+      # failing the release — npm treats an unpublished optional dependency as "not installed".
+      - name: Publish platform packages
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -uo pipefail
+          for pkg in crates/sessiongraph-core/npm/*/; do
+            if [ "$(find "$pkg" -maxdepth 1 -name '*.node' | wc -l)" -ne 1 ]; then
+              echo "skipping $pkg (no binary in this run)"
+              continue
+            fi
+            echo "publishing $pkg"
+            if ! npm publish "$pkg" --access public 2>&1 | tee /tmp/pub.log; then
+              if grep -qE "previously published|cannot publish over" /tmp/pub.log; then
+                echo "$pkg already at this version; continuing"
+              else
+                exit 1
+              fi
+            fi
+          done
+
+      # Not frozen: the optional platform packages were only just published, so the lockfile this
+      # checkout carries predates them. CI does not commit the lockfile.
+      - run: pnpm install --no-frozen-lockfile
 
       # Publishing an artifact that does not typecheck or pass its own tests is
       # not recoverable: npm forbids re-using a version number.

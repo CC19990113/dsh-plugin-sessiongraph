@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { zstdCompressSync } from 'node:zlib'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { tokenize } from 'dsh-plugin-sessiongraph-service'
-import { loadNative } from '../src/index.ts'
+import { indexerPackageName, loadNative } from '../src/index.ts'
 
 /**
  * The native kernel is an optional acceleration: `loadNative()` returns `undefined` on a machine
@@ -387,5 +387,17 @@ describe('native index kernel', () => {
     expect(report.entries).toBe(0)
     expect(existsSync(indexPath)).toBe(true)
     expect(JSON.parse(await readFile(join(indexRoot, 'status.json'), 'utf8'))).toMatchObject({ sessions: 0, entries: 0 })
+  })
+})
+
+describe('platform package naming', () => {
+  it('names one package per published platform, and nothing for the rest', () => {
+    expect(indexerPackageName('darwin', 'arm64')).toBe('dsh-plugin-sessiongraph-indexer-darwin-arm64')
+    expect(indexerPackageName('darwin', 'x64')).toBe('dsh-plugin-sessiongraph-indexer-darwin-x64')
+    expect(indexerPackageName('linux', 'x64')).toBe('dsh-plugin-sessiongraph-indexer-linux-x64-gnu')
+    expect(indexerPackageName('linux', 'arm64')).toBe('dsh-plugin-sessiongraph-indexer-linux-arm64-gnu')
+    expect(indexerPackageName('win32', 'x64')).toBe('dsh-plugin-sessiongraph-indexer-win32-x64-msvc')
+    // A platform with no published build must answer nothing rather than guess a name.
+    expect(indexerPackageName('freebsd', 'x64')).toBeUndefined()
   })
 })

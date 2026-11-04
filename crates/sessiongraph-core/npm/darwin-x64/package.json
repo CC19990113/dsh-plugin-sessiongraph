@@ -1,0 +1,20 @@
+{
+  "name": "dsh-plugin-sessiongraph-indexer-darwin-x64",
+  "version": "0.1.19",
+  "description": "The native sessiongraph index kernel for macOS on Intel. Installed automatically by dsh-plugin-sessiongraph-native; do not depend on it directly.",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "sessiongraph-core.darwin-x64.node",
+  "files": [
+    "sessiongraph-core.darwin-x64.node"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CC19990113/dsh-plugin-sessiongraph.git"
+  }
+}

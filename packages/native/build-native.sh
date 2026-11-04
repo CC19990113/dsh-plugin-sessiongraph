@@ -25,14 +25,33 @@ case "$(uname -s | tr '[:upper:]' '[:lower:]')" in
 esac
 
 host_arch="$(uname -m)"
-case "$host_arch" in
-  arm64 | aarch64) arch=arm64 ;;
-  x86_64 | amd64) arch=x64 ;;
-  *)
-    echo "build-native: unsupported architecture $host_arch" >&2
-    exit 1
-    ;;
-esac
+
+# TARGET_TRIPLE lets the release matrix cross-build (Intel macOS on an arm64 runner, say). When it is
+# set, platform/arch come from the triple instead of the host, and cargo is told to build for it.
+target="${TARGET_TRIPLE:-}"
+if [ -n "$target" ]; then
+  case "$target" in
+    aarch64-apple-darwin) platform=darwin; arch=arm64; lib=libsessiongraph_core.dylib ;;
+    x86_64-apple-darwin) platform=darwin; arch=x64; lib=libsessiongraph_core.dylib ;;
+    x86_64-unknown-linux-gnu) platform=linux; arch=x64; lib=libsessiongraph_core.so ;;
+    aarch64-unknown-linux-gnu) platform=linux; arch=arm64; lib=libsessiongraph_core.so ;;
+    x86_64-pc-windows-msvc) platform=win32; arch=x64; lib=sessiongraph_core.dll ;;
+    *) echo "build-native: unsupported target $target" >&2; exit 1 ;;
+  esac
+  echo "build-native: cross-building for $target"
+  host_arch=""   # the architecture check below only applies to a host build
+fi
+
+if [ -z "$target" ]; then
+  case "$host_arch" in
+    arm64 | aarch64) arch=arm64 ;;
+    x86_64 | amd64) arch=x64 ;;
+    *)
+      echo "build-native: unsupported architecture $host_arch" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 # Prefer the toolchain whose architecture matches the host, when rustup has it installed. Rustup
 # spells it `aarch64`, while `uname -m`/Node say `arm64`; getting this wrong silently falls back to
@@ -53,10 +72,15 @@ if [ -z "${RUSTUP_TOOLCHAIN:-}" ] && command -v rustup >/dev/null 2>&1; then
   fi
 fi
 
-echo "build-native: cargo build --release ($crate)"
-(cd "$crate" && cargo build --release)
-
-source_file="$crate/target/release/$lib"
+if [ -n "$target" ]; then
+  echo "build-native: cargo build --release --target $target ($crate)"
+  (cd "$crate" && cargo build --release --target "$target")
+  source_file="$crate/target/$target/release/$lib"
+else
+  echo "build-native: cargo build --release ($crate)"
+  (cd "$crate" && cargo build --release)
+  source_file="$crate/target/release/$lib"
+fi
 if [ ! -f "$source_file" ]; then
   echo "build-native: expected $source_file; check [lib] crate-type = [\"cdylib\"]" >&2
   exit 1
@@ -64,7 +88,7 @@ fi
 
 # A cdylib built for the wrong architecture is the one failure that looks like success: cargo says
 # "Finished", the file exists, and Node then refuses to load it.
-if command -v file >/dev/null 2>&1 && ! file "$source_file" | grep -qw "$host_arch"; then
+if [ -n "$host_arch" ] && command -v file >/dev/null 2>&1 && ! file "$source_file" | grep -qw "$host_arch"; then
   echo "build-native: $source_file is not built for $host_arch:" >&2
   file "$source_file" >&2
   exit 1
@@ -72,6 +96,22 @@ fi
 
 destination="$here/sessiongraph-core.$platform-$arch.node"
 cp "$source_file" "$destination"
+
+# Also stage into the per-platform npm package. That is the copy the release publishes, and the only
+# one a user ever receives — the loader prefers the local file first so a checkout keeps working, but
+# Windows/Linux/Intel users get their kernel from here.
+suffix="$platform-$arch"
+case "$suffix" in
+  linux-x64 | linux-arm64) suffix="$suffix-gnu" ;;
+  win32-x64) suffix="$suffix-msvc" ;;
+esac
+package_dir="$crate/npm/$suffix"
+if [ -d "$package_dir" ]; then
+  cp "$destination" "$package_dir/sessiongraph-core.$platform-$arch.node"
+  echo "build-native: staged $package_dir/sessiongraph-core.$platform-$arch.node"
+else
+  echo "build-native: warning: no platform package at $package_dir (kernel will not be published for this platform)" >&2
+fi
 
 # arm64 macOS kills an unsigned Mach-O outright (SIGKILL at dlopen, not an error the loader
 # reports), and copying a linker-signed binary to a new path does not preserve that signature.
