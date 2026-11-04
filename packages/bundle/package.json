@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-sessiongraph",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "Bundle for the sessiongraph capability — install this package to add local conversation-history search to a DeepSeek Harness profile",
   "keywords": [
     "dsh",
