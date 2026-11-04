@@ -59,6 +59,7 @@ import type {
 import { agentIdOf, indexStatusHint } from './status-hint.ts'
 import { createUpdateChecker, defaultStateFile, DEFAULT_UPDATE_CHECK_INTERVAL_MS, readOwnVersion } from './version-check.ts'
 import type { UpdateChecker } from './version-check.ts'
+import { createHistoryHintState, noteHistoryToolUse, registerHistoryHint } from './history-hint.ts'
 
 // The seam package does not publish this augmentation itself yet; declaring it here is what lets
 // `ctx.sessiongraph` be typed as the facade the service class implements. It is a pure type-level
@@ -204,6 +205,14 @@ export interface Config {
    * registry GET, so the cost of a shorter interval is latency nobody waits on, not tokens.
    */
   updateCheckIntervalMs?: number
+  /**
+   * Append one reminder to the model request whose user input looks like a question about past
+   * conversations, when that conversation has not used the index yet (default true). The system
+   * prompt already says to use the index; this is the moment-of-use nudge for a model that has just
+   * been handed a memory summary and would otherwise answer from it. Once per conversation, never
+   * after the tool itself ran.
+   */
+  historyHint?: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -216,6 +225,7 @@ export const Config: z<Config> = z.object({
   indexTimeoutMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_SESSIONGRAPH_INDEX_TIMEOUT_MS),
   updateCheck: z.boolean().default(true),
   updateCheckIntervalMs: z.number().default(DEFAULT_UPDATE_CHECK_INTERVAL_MS),
+  historyHint: z.boolean().default(true),
 })
 
 type ResolvedConfig = Required<Config>
@@ -260,6 +270,11 @@ export function apply(ctx: Context, config: Config): void {
       ctx.sessiongraph.index(indexRoot, options, signal),
   })
 
+  // Shared between the tools and the pre-step hook: a conversation that already reached the index
+  // must not be told the index exists. Kept even when the hint is off, so turning the reminder back
+  // on mid-process cannot re-nag a conversation that has been using the tool all along.
+  const historyHintState = createHistoryHintState()
+
   // A function, not a string: the host re-evaluates it on every assembly, which is what lets the model
   // learn whether an index exists for free instead of spending a `status` round-trip. It does one
   // synchronous stat and never opens the index — see `status-hint.ts`.
@@ -281,6 +296,7 @@ export function apply(ctx: Context, config: Config): void {
     timeoutMs: resolved.timeoutMs,
     async execute(args, exec) {
       updateChecker?.noteToolUse(agentIdOf(exec))
+      noteHistoryToolUse(historyHintState, exec)
       return runQuery(ctx, refresher, indexRoot, resolved, args, exec)
     },
     presentCall: args => ({
@@ -303,6 +319,7 @@ export function apply(ctx: Context, config: Config): void {
     timeoutMs: resolved.indexTimeoutMs,
     async execute(args, exec) {
       updateChecker?.noteToolUse(agentIdOf(exec))
+      noteHistoryToolUse(historyHintState, exec)
       return runIndex(ctx, indexRoot, args, exec)
     },
     presentCall: args => {
@@ -330,6 +347,12 @@ export function apply(ctx: Context, config: Config): void {
   // inserts its `[model changed: …]` notice. Registering it here (rather than at module scope) keeps
   // the listener tied to this plugin instance's lifetime.
   if (updateChecker !== undefined) registerUpdateNotice(ctx, updateChecker)
+
+  // The history reminder rides the same waterfall: `agent/pre-step` is the one surface between the
+  // user's input and the next model request, which is exactly where "this looks like a question about
+  // the past, and no summary is allowed to be the evidence" belongs. Registered here for the same
+  // lifetime reason as the notice above.
+  if (resolved.historyHint) registerHistoryHint(ctx, historyHintState)
 }
 
 /**
