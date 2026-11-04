@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
@@ -39,8 +39,8 @@ function config(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     toolCallChars: 2_000,
     maxFileBytes: 64 * 1024 * 1024,
     autoIndex: true,
+    autoIndexMinIntervalMs: 60_000,
     autoBuild: true,
-    backgroundIndexThreshold: 1_000,
     maxLiveSessions: 8,
     engine: 'typescript',
     ...overrides,
@@ -53,13 +53,13 @@ function frame(record: unknown): Buffer {
 }
 
 /** Write one small session log into the fixture store. */
-async function writeSessionLog(): Promise<void> {
-  const directory = join(fixture.sessionsRoot, '--Users-admin-www-demo--', 'session-aaaa')
+async function writeSessionLog(id = 'session-aaaa'): Promise<void> {
+  const directory = join(fixture.sessionsRoot, '--Users-admin-www-demo--', id)
   await mkdir(directory, { recursive: true })
   await writeFile(
     join(directory, 'session.v4.jsonl.zstd'),
     Buffer.concat([
-      frame({ type: 'session', version: 4, id: 'session-aaaa', createdAt: 1_700_000_000_000, cwd: '/Users/admin/www/demo' }),
+      frame({ type: 'session', version: 4, id, createdAt: 1_700_000_000_000, cwd: '/Users/admin/www/demo' }),
       frame({
         type: 'user/message',
         seq: 1,
@@ -70,51 +70,14 @@ async function writeSessionLog(): Promise<void> {
   )
 }
 
-/** One job the fake registry was asked to start, with the log its producer body writes. */
-interface RecordedJob {
-  readonly spec: {
-    readonly owner: string
-    readonly kind: string
-    readonly label: string
-    readonly run: (handle: { append(text: string): void }) => {
-      cancel(reason?: string): void
-      done: Promise<{ status: string; detail?: string }>
-    }
-  }
-  readonly output: string[]
-}
-
-/** A stand-in for the host's background-job registry. */
-function fakeJobs(options: { refuse?: boolean } = {}): {
-  started: RecordedJob[]
-  jobs: { start(spec: RecordedJob['spec']): string }
-} {
-  const started: RecordedJob[] = []
-  return {
-    started,
-    jobs: {
-      start(spec: RecordedJob['spec']): string {
-        if (options.refuse === true) throw new Error('background jobs unavailable: no job controller serves this agent')
-        started.push({ spec, output: [] })
-        return `job-${started.length}`
-      },
-    },
-  }
-}
-
-/** Invoke one recorded job's producer, the way the registry does while building the job record. */
-function driveJob(job: RecordedJob): ReturnType<RecordedJob['spec']['run']> {
-  return job.spec.run({ append: text => { job.output.push(text) } })
-}
-
 /** The `agent/created` payload the host dispatches during agent registration. */
 interface AgentCreatedPayload {
   readonly agent: { readonly id: string; readonly session: { readonly header: { readonly cwd?: string } } }
 }
 
 /**
- * Mount the service and this plugin, optionally serving a fake job registry.
- * @param options - plugin config overrides and the jobs registry to provide.
+ * Mount the service and this plugin.
+ * @param options - plugin config overrides and an optional fake job registry.
  * @returns the mounted context.
  */
 async function mount(options: { jobs?: unknown; config?: Partial<ResolvedConfig> } = {}): Promise<Context> {
@@ -141,127 +104,127 @@ async function buildIndex(): Promise<void> {
   await SessionsPlugin.runIndex(fixture.indexRoot, {}, undefined, config())
 }
 
+/** The sidecar summary the last run left, or undefined when no run has written one yet. */
+function statusOf(): { readonly indexedAt: number; readonly sessions: number } | undefined {
+  try {
+    return JSON.parse(readFileSync(join(fixture.indexRoot, SessionsPlugin.STATUS_RELATIVE_PATH), 'utf8'))
+  } catch {
+    return undefined
+  }
+}
+
+/** Wait for a background run to land, since session creation never blocks on it. */
+async function waitUntil(check: () => boolean, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (check()) return
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  throw new Error('timed out waiting for the background index run')
+}
+
+/** Wait a fixed span, for assertions that something must NOT have happened. */
+async function settle(ms: number): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, ms))
+}
+
 describe('automatic index on session creation', () => {
-  it('refreshes an existing index in the background and settles its job', async () => {
-    await writeSessionLog()
+  it('refreshes an existing index in the background', async () => {
+    await writeSessionLog('session-aaaa')
     await buildIndex()
-    const { started, jobs } = fakeJobs()
-    const ctx = await mount({ jobs })
+    expect(statusOf()?.sessions).toBe(1)
+
+    const ctx = await mount()
+    await writeSessionLog('session-bbbb')
+    emitAgentCreated(ctx, '/Users/admin/www/demo')
+
+    await waitUntil(() => statusOf()?.sessions === 2)
+    expect(existsSync(join(fixture.indexRoot, INDEX_RELATIVE_PATH))).toBe(true)
+  })
+
+  it('never registers a job, so no completion notice can reach the transcript', async () => {
+    // 这是本次改动的核心契约：自动刷新是维护动作，宿主 job 的完成通知会唤醒一轮对话、污染会话。
+    await writeSessionLog('session-aaaa')
+    await buildIndex()
+    const start = vi.fn(() => {
+      throw new Error('automatic index must not register a host job')
+    })
+    const ctx = await mount({ jobs: { start } })
+
+    await writeSessionLog('session-bbbb')
+    emitAgentCreated(ctx, '/Users/admin/www/demo')
+
+    await waitUntil(() => statusOf()?.sessions === 2)
+    expect(start).not.toHaveBeenCalled()
+  })
+
+  it('builds the first index in the background when none exists', async () => {
+    await writeSessionLog()
+    const ctx = await mount()
 
     emitAgentCreated(ctx, '/Users/admin/www/demo')
 
-    expect(started).toHaveLength(1)
-    expect(started[0]?.spec).toMatchObject({
-      owner: 'session-new',
-      kind: SessionsPlugin.AUTO_INDEX_JOB_KIND,
-    })
-    expect(started[0]?.spec.label).toContain('/Users/admin/www/demo')
-
-    // The producer body is what the registry invokes; both halves of the contract must work.
-    const job = started[0] as RecordedJob
-    const hooks = driveJob(job)
-    const outcome = await hooks.done
-    expect(outcome.status).toBe('completed')
-    expect(job.output.join('')).toContain('Indexed')
-    expect(existsSync(join(fixture.indexRoot, INDEX_RELATIVE_PATH))).toBe(true)
-    expect(existsSync(join(fixture.indexRoot, SessionsPlugin.STATUS_RELATIVE_PATH))).toBe(true)
+    expect(existsSync(join(fixture.indexRoot, 'index.db'))).toBe(false)
+    await waitUntil(() => statusOf()?.sessions === 1)
+    expect(existsSync(join(fixture.indexRoot, 'index.db'))).toBe(true)
   })
 
   it('refreshes again once the auto-index window has passed', async () => {
     // 索引的意义是「刚说的话也查得到」。进程内只跑一次，桌面开几天后就落后一整天；
     // 改成时间窗口后，窗口内吸收 burst，窗口外下一次会话就刷新。
-    await writeSessionLog()
+    await writeSessionLog('session-aaaa')
     await buildIndex()
-    const { started, jobs } = fakeJobs()
-    const ctx = await mount({ jobs, config: { autoIndexMinIntervalMs: 50 } })
+    const ctx = await mount({ config: { autoIndexMinIntervalMs: 1_000 } })
 
+    await writeSessionLog('session-bbbb')
     emitAgentCreated(ctx, '/Users/admin/www/demo')
-    expect(started).toHaveLength(1)
+    await waitUntil(() => statusOf()?.sessions === 2)
+
     // 窗口内再开一个会话：同一个 root 不重复排
+    await writeSessionLog('session-cccc')
     emitAgentCreated(ctx, '/Users/admin/www/demo')
-    expect(started).toHaveLength(1)
+    await settle(150)
+    expect(statusOf()?.sessions).toBe(2)
 
     // 过了窗口：下一次会话触发刷新
-    await new Promise(resolve => setTimeout(resolve, 80))
+    await settle(1_000)
     emitAgentCreated(ctx, '/Users/admin/www/demo')
-    expect(started).toHaveLength(2)
-  })
-
-  it('builds the first index in the background when none exists', async () => {
-    await writeSessionLog()
-    const { started, jobs } = fakeJobs()
-    const ctx = await mount({ jobs })
-
-    emitAgentCreated(ctx, '/Users/admin/www/demo')
-
-    expect(started).toHaveLength(1)
-    expect(started[0]?.spec.label).toContain('first build')
-    expect(existsSync(join(fixture.indexRoot, 'index.db'))).toBe(false)
+    await waitUntil(() => statusOf()?.sessions === 3)
   })
 
   it('leaves a machine with no index alone when autoBuild is false', async () => {
     await writeSessionLog()
-    const { started, jobs } = fakeJobs()
-    const ctx = await mount({ jobs, config: { autoBuild: false } })
+    const ctx = await mount({ config: { autoBuild: false } })
 
     emitAgentCreated(ctx, '/Users/admin/www/demo')
 
-    expect(started).toHaveLength(0)
+    await settle(100)
+    expect(existsSync(join(fixture.indexRoot, INDEX_RELATIVE_PATH))).toBe(false)
+    // The manual indexer is unaffected by switching the automatic refresh off.
+    const report = await SessionsPlugin.runIndex(fixture.indexRoot, {}, undefined, config())
+    expect(report.sessions).toBe(1)
   })
 
   it('does not auto-build without a workspace on the new session', async () => {
     await writeSessionLog()
     await buildIndex()
-    const { started, jobs } = fakeJobs()
-    const ctx = await mount({ jobs })
+    const ctx = await mount()
 
     emitAgentCreated(ctx, undefined)
 
-    expect(started).toHaveLength(0)
-  })
-
-  it('returns silently when the host has no jobs service', async () => {
-    await writeSessionLog()
-    await buildIndex()
-    const ctx = await mount()
-
-    expect(() => emitAgentCreated(ctx, '/Users/admin/www/demo')).not.toThrow()
-  })
-
-  it('schedules at most one refresh per root per process', async () => {
-    await writeSessionLog()
-    await buildIndex()
-    const { started, jobs } = fakeJobs()
-    const ctx = await mount({ jobs })
-
-    emitAgentCreated(ctx, '/Users/admin/www/demo')
-    emitAgentCreated(ctx, '/Users/admin/www/demo')
-
-    expect(started).toHaveLength(1)
-  })
-
-  it('swallows a refusing job registry after one console error', async () => {
-    await writeSessionLog()
-    await buildIndex()
-    const { jobs } = fakeJobs({ refuse: true })
-    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const ctx = await mount({ jobs })
-
-    expect(() => emitAgentCreated(ctx, '/Users/admin/www/demo')).not.toThrow()
-    expect(logged).toHaveBeenCalledTimes(1)
+    await settle(100)
+    expect(statusOf()?.sessions).toBe(1)
   })
 
   it('registers no listener at all when autoIndex is false', async () => {
     await writeSessionLog()
     await buildIndex()
-    const { started, jobs } = fakeJobs()
-    const ctx = await mount({ jobs, config: { autoIndex: false } })
+    const ctx = await mount({ config: { autoIndex: false } })
 
+    await writeSessionLog('session-bbbb')
     emitAgentCreated(ctx, '/Users/admin/www/demo')
 
-    expect(started).toHaveLength(0)
-    // The manual indexer is unaffected by switching the automatic refresh off.
-    const report = await SessionsPlugin.runIndex(fixture.indexRoot, {}, undefined, config())
-    expect(report.sessions).toBe(1)
+    await settle(100)
+    expect(statusOf()?.sessions).toBe(1)
   })
 })

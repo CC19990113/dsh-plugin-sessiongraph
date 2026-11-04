@@ -97,7 +97,7 @@ Memory does not overlap with either: a conversation may **never enter memory** (
 | When | Mechanism | Cost |
 |---|---|---|
 | **The first time** (no index yet) | Session creation builds it in the background (`autoBuild`, on by default) | seconds to minutes, off the critical path |
-| **On session creation** (index present) | `agent/created` → incremental run through `ctx.jobs`, never blocking | 59–107 ms |
+| **On session creation** (index present) | `agent/created` → background incremental run, never blocking and never registered as a host job (a job's completion notice would inject into the conversation) | 59–107 ms |
 | **Before a query** | If `status.json`'s `indexedAt` is older than 5 minutes, refresh incrementally first | ~400 ms |
 | **The current session** | Reads the host's `ctx.sessionQuery` and indexes live sessions that have not hit disk yet | negligible |
 

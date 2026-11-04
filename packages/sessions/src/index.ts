@@ -16,9 +16,11 @@
  *
  * Every session creation also does indexing work in the background (`agent/created`, `autoIndex`):
  * an existing index is refreshed incrementally, and a missing one is built from scratch (`autoBuild`,
- * default true) so a fresh install becomes searchable without the user running anything. Both runs
- * go through the host's job registry and never block session creation. `autoBuild: false` restores
- * the stricter behaviour where nothing is indexed until the caller asks for it.
+ * default true) so a fresh install becomes searchable without the user running anything. Those runs
+ * are plain background promises, not host jobs: a registered job reports its settlement back to the
+ * owning agent, which would put an unasked-for maintenance notice into the transcript and (under the
+ * host's default `wakeup` delivery) open a turn of its own. `autoBuild: false` restores the stricter
+ * behaviour where nothing is indexed until the caller asks for it.
  *
  * Sessions the host still holds in memory (`ctx.sessionQuery`) are indexed as well, in a second pass
  * after the file-path transaction commits: a conversation that is still running has no log on disk
@@ -220,6 +222,10 @@ export function apply(ctx: Context, config: Config): void {
   // said is findable, and "once until restart" stopped being enough the moment the desktop stayed up
   // for days. The window still absorbs a burst of session creations into one run.
   const autoIndexRuns = new Map<string, number>()
+  // Roots whose automatic run is still executing. Kept apart from `autoIndexRuns`, which is a time
+  // window: a first build can outlive the window, and two runs on one root would only fight over the
+  // write lock.
+  const autoIndexInFlight = new Set<string>()
   // `agent/created` is typed by the host's agent service; this package reads only the two fields it
   // needs through a structural face rather than depending on that package.
   const agentEvents = ctx as unknown as AgentLifecycleContext
@@ -227,7 +233,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(function* () {
     if (resolved.autoIndex) {
       yield agentEvents.on('agent/created', payload => {
-        scheduleAutoIndex(ctx, resolved, autoIndexRuns, payload)
+        scheduleAutoIndex(resolved, autoIndexRuns, autoIndexInFlight, payload)
       })
     }
     yield ctx.sessiongraph.registerIndexer(indexer)
@@ -370,16 +376,25 @@ export function isBackgroundIndexReport(report: SessiongraphIndexReport): report
  *
  * Runs synchronously inside `agent/created` dispatch, which happens during agent registration, so it
  * must never block or throw: a synchronous index here would hold up the session's own creation. It
- * only decides whether a refresh is warranted and hands one to the host's job registry.
- * @param ctx - the plugin context, consulted for the optional job registry.
+ * only decides whether a refresh is warranted and starts one in the background.
+ *
+ * The run deliberately does **not** go through the host's job registry. A registered job announces
+ * its settlement to the owning agent — the host injects a completion notice into the next step and,
+ * under the default `wakeup` delivery, opens a turn on an idle one. A maintenance refresh nobody
+ * asked for must not appear in the transcript or start a reply of its own, so this runs as a plain
+ * background promise: the index still keeps itself fresh, and the conversation stays quiet. The
+ * explicit `sessiongraph_index` path is the one that still registers a job, because there a caller
+ * is waiting for the id.
  * @param config - the resolved plugin configuration.
  * @param autoIndexRuns - when each root last had an automatic refresh, in epoch milliseconds.
+ * @param autoIndexInFlight - roots with a background run still executing, so a slow first build cannot
+ * be started twice by sessions that open past the time window.
  * @param payload - the `agent/created` dispatch payload.
  */
 function scheduleAutoIndex(
-  ctx: Context,
   config: ResolvedConfig,
   autoIndexRuns: Map<string, number>,
+  autoIndexInFlight: Set<string>,
   payload: AgentCreatedPayload,
 ): void {
   try {
@@ -394,31 +409,38 @@ function scheduleAutoIndex(
     // index exists to pick up, and it costs tens of milliseconds against a warm cache.
     const previous = autoIndexRuns.get(indexRoot)
     if (previous !== undefined && now - previous < config.autoIndexMinIntervalMs) return
+    // A run already executing for this root is the one the window would have deduplicated if it had
+    // been slow enough to straddle it; starting a second would only collide on the index write lock.
+    if (autoIndexInFlight.has(indexRoot)) return
     // A first build reads every log on the machine and can take a while, so it stays a background
-    // job like the incremental refresh. `autoBuild: false` restores the stricter behaviour where
+    // run like the incremental refresh. `autoBuild: false` restores the stricter behaviour where
     // nothing becomes searchable until someone asks for it.
     const existing = hasExistingIndex(indexRoot)
     if (!existing && !config.autoBuild) return
-    // `ctx.get` rather than an `inject` entry: background jobs are a host composition choice, and
-    // requiring the service would hide this whole indexer from a profile that runs none.
-    const jobs = ctx.get('jobs') as AutoIndexJobRegistry | undefined
-    if (jobs === undefined) return
-    jobs.start({
-      // The registry keys a job by its owning session id, not the agent object.
-      owner: agent.id,
-      kind: AUTO_INDEX_JOB_KIND,
-      label: existing
-        ? `sessiongraph refresh for ${workspace}`
-        : `sessiongraph first build for ${workspace}`,
-      run: handle => runIndexJob(indexRoot, {}, config, handle),
-    })
-    // Marked only after the registry accepted the job, so a refusal leaves the root eligible for
-    // the next session that opens.
     autoIndexRuns.set(indexRoot, now)
+    autoIndexInFlight.add(indexRoot)
+    // Never rejects: a lost refresh is a degradation, not an error the session can act on.
+    void runAutomaticIndex(indexRoot, config).finally(() => autoIndexInFlight.delete(indexRoot))
   } catch (error) {
     // A throwing listener would veto publication of the agent. Losing a refresh is a degradation,
     // never a reason to stop a session from starting; report once and carry on.
     console.error(`sessiongraph-sessions: automatic index after session creation failed: ${describeError(error)}`)
+  }
+}
+
+/**
+ * Run one automatic refresh to completion, reporting a failure instead of propagating it.
+ *
+ * The run gets no abort signal of its own: nothing in the transcript can cancel it, and the write
+ * lock makes an abandoned or duplicated run harmless. Session creation never waits on this promise.
+ * @param indexRoot - the index to refresh.
+ * @param config - the resolved plugin configuration.
+ */
+async function runAutomaticIndex(indexRoot: string, config: ResolvedConfig): Promise<void> {
+  try {
+    await runIndex(indexRoot, {}, undefined, config)
+  } catch (error) {
+    console.error(`sessiongraph-sessions: automatic index for ${indexRoot} failed: ${describeError(error)}`)
   }
 }
 
