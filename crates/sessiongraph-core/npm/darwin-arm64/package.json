@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-sessiongraph-indexer-darwin-arm64",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "description": "The native sessiongraph index kernel for macOS on Apple Silicon. Installed automatically by dsh-plugin-sessiongraph-native; do not depend on it directly.",
   "os": [
     "darwin"
