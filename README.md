@@ -145,3 +145,21 @@ pnpm test       # vitest run, 200+ tests
 ```
 
 Internal contracts — data format, schema, tokenizer rules, per-package responsibilities, and which host capabilities this plugin reuses — live in [`DESIGN.md`](./DESIGN.md).
+
+## Releasing
+
+Two commands, because `pnpm-lock.yaml` cannot be regenerated before the platform addons exist on the
+registry: an addon version only becomes resolvable after the tag-triggered workflow publishes it.
+
+```sh
+pnpm run release:prepare 0.1.22     # every published manifest + the five addon pins + the exclude list
+git commit -am "chore(release): 0.1.22"
+git tag v0.1.22 && git push --tags  # publish.yml builds the kernels first, then the five packages
+pnpm run release:finish             # regenerate the lockfile, then re-run the gate CI runs
+git add -A && git commit -m "chore: 补上平台包在 lockfile 里的记录"
+```
+
+`pnpm run check:versions` is that gate. It compares the six package versions, the five kernel
+manifests, `packages/native`'s `optionalDependencies` pins, the lockfile's recorded specifiers and the
+`minimumReleaseAgeExclude` list — and fails *before* anything is published rather than halfway through
+a release. Both `ci.yml` and `publish.yml` run it first.
