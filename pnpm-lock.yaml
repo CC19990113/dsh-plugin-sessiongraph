@@ -64,20 +64,20 @@ importers:
         version: 22.20.5
     optionalDependencies:
       dsh-plugin-sessiongraph-indexer-darwin-arm64:
-        specifier: 0.1.20
-        version: 0.1.20
+        specifier: 0.1.21
+        version: 0.1.21
       dsh-plugin-sessiongraph-indexer-darwin-x64:
-        specifier: 0.1.20
-        version: 0.1.20
+        specifier: 0.1.21
+        version: 0.1.21
       dsh-plugin-sessiongraph-indexer-linux-arm64-gnu:
-        specifier: 0.1.20
-        version: 0.1.20
+        specifier: 0.1.21
+        version: 0.1.21
       dsh-plugin-sessiongraph-indexer-linux-x64-gnu:
-        specifier: 0.1.20
-        version: 0.1.20
+        specifier: 0.1.21
+        version: 0.1.21
       dsh-plugin-sessiongraph-indexer-win32-x64-msvc:
-        specifier: 0.1.20
-        version: 0.1.20
+        specifier: 0.1.21
+        version: 0.1.21
 
   packages/service:
     dependencies:
@@ -505,28 +505,28 @@ packages:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
 
-  dsh-plugin-sessiongraph-indexer-darwin-arm64@0.1.20:
-    resolution: {integrity: sha512-5RatHZJjWowgcQHYVXjdLi4g0YmrCFMv6rI0wrtrxNQnjHKeN8VY2uhwuRynuNZPNoj+M1MMK+4wHg8JLbTeSQ==}
+  dsh-plugin-sessiongraph-indexer-darwin-arm64@0.1.21:
+    resolution: {integrity: sha512-S0ntojJwACj9SmOcvnM/0RLI9lJYaVnNeK2R+e37U+wUpScBU0NJEVpYXU5ETOaDb3zeD+B2bAdVcKDjVYr4YA==}
     cpu: [arm64]
     os: [darwin]
 
-  dsh-plugin-sessiongraph-indexer-darwin-x64@0.1.20:
-    resolution: {integrity: sha512-k4SvKu7TjFl/3Kp9mwXg4fKSlpl/TL2OAuaxWHdT5Kw3gOB/huVDcva+H+vFUKzrFLOZcl+QLSmiwpVwEWOPhQ==}
+  dsh-plugin-sessiongraph-indexer-darwin-x64@0.1.21:
+    resolution: {integrity: sha512-WwUVyEuJ9KVTVBzEAWiHhZLWChtk2YypuA8+gnjN3kLC6tpckaDmAe66XH8brIuwK/4Qbn76woEtt9BnUifuuQ==}
     cpu: [x64]
     os: [darwin]
 
-  dsh-plugin-sessiongraph-indexer-linux-arm64-gnu@0.1.20:
-    resolution: {integrity: sha512-LwLzZ6eDjr7/YPa+nRYrgIwbZPVC9XCfjO2emJSTAr8dJUSzTwphfCXcZu4Hbt0GTPKBDytBogx9WP7UQOXOiw==}
+  dsh-plugin-sessiongraph-indexer-linux-arm64-gnu@0.1.21:
+    resolution: {integrity: sha512-gWXWwqf9rReIcqtJuYXytWxIg23GxksC23gaf2X4uPkad8FXFzHZC4lkew2Zvm8KpeMOBxnYutxcUrJnllSnpA==}
     cpu: [arm64]
     os: [linux]
 
-  dsh-plugin-sessiongraph-indexer-linux-x64-gnu@0.1.20:
-    resolution: {integrity: sha512-1ficXjnD3YGrhKiNEdHVvzAW0v8KpkAMUq4NTaye8sE82ALrTLDdU3pu94/tXPFizUcYioKcFVXuIEjkKH69pw==}
+  dsh-plugin-sessiongraph-indexer-linux-x64-gnu@0.1.21:
+    resolution: {integrity: sha512-qVSqj8utc6VCK3Kq/ZyLaxjlFgpIGFXmQNJNhdEmQ5Qm2uMCfJKWUe+RpnGVgWgAbG53nAcoddUDr9yoaEx4tQ==}
     cpu: [x64]
     os: [linux]
 
-  dsh-plugin-sessiongraph-indexer-win32-x64-msvc@0.1.20:
-    resolution: {integrity: sha512-OHdW+z/fgqkr5hir1qZ1wWX9ZKIbysbikWM7sIVpHTm3gU00gNxewjV309PstqwOyqntHGBMvtkipHsiZjKfgA==}
+  dsh-plugin-sessiongraph-indexer-win32-x64-msvc@0.1.21:
+    resolution: {integrity: sha512-hjVjUwJFy/s4jcPKBleeURjQYRBABmp/CJQIw7KfrxlbpiZw1p9Jo3+9pV1y1Q4oRrsgl+M5iirGnS4VPjNL/g==}
     cpu: [x64]
     os: [win32]
 
@@ -1119,19 +1119,19 @@ snapshots:
 
   detect-libc@2.1.2: {}
 
-  dsh-plugin-sessiongraph-indexer-darwin-arm64@0.1.20:
+  dsh-plugin-sessiongraph-indexer-darwin-arm64@0.1.21:
     optional: true
 
-  dsh-plugin-sessiongraph-indexer-darwin-x64@0.1.20:
+  dsh-plugin-sessiongraph-indexer-darwin-x64@0.1.21:
     optional: true
 
-  dsh-plugin-sessiongraph-indexer-linux-arm64-gnu@0.1.20:
+  dsh-plugin-sessiongraph-indexer-linux-arm64-gnu@0.1.21:
     optional: true
 
-  dsh-plugin-sessiongraph-indexer-linux-x64-gnu@0.1.20:
+  dsh-plugin-sessiongraph-indexer-linux-x64-gnu@0.1.21:
     optional: true
 
-  dsh-plugin-sessiongraph-indexer-win32-x64-msvc@0.1.20:
+  dsh-plugin-sessiongraph-indexer-win32-x64-msvc@0.1.21:
     optional: true
 
   es-module-lexer@2.3.2: {}
