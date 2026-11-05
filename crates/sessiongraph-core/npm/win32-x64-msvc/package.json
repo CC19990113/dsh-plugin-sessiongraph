@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-sessiongraph-indexer-win32-x64-msvc",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "description": "The native sessiongraph index kernel for Windows x64. Installed automatically by dsh-plugin-sessiongraph-native; do not depend on it directly.",
   "os": [
     "win32"

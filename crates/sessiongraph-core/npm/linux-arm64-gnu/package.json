@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-sessiongraph-indexer-linux-arm64-gnu",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "description": "The native sessiongraph index kernel for Linux arm64 (glibc). Installed automatically by dsh-plugin-sessiongraph-native; do not depend on it directly.",
   "os": [
     "linux"
