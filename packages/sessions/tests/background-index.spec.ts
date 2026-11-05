@@ -40,6 +40,7 @@ function config(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     maxFileBytes: 64 * 1024 * 1024,
     autoIndex: false,
     backgroundIndexThreshold: 1_000,
+    autoIndexTimeoutMs: 900_000,
     maxLiveSessions: 8,
     engine: 'typescript',
     ...overrides,

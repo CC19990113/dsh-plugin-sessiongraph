@@ -8,6 +8,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { INDEX_RELATIVE_PATH } from 'dsh-plugin-sessiongraph-service'
 import * as ServicePlugin from 'dsh-plugin-sessiongraph-service'
 import * as SessionsPlugin from '../src/index.ts'
+import { acquireIndexLock } from '../src/lock.ts'
 import type { ResolvedConfig } from '../src/index.ts'
 
 /** Temporary roots for one test. */
@@ -40,6 +41,7 @@ function config(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     maxFileBytes: 64 * 1024 * 1024,
     autoIndex: true,
     autoIndexMinIntervalMs: 60_000,
+    autoIndexTimeoutMs: 900_000,
     autoBuild: true,
     maxLiveSessions: 8,
     engine: 'typescript',
@@ -105,9 +107,9 @@ async function buildIndex(): Promise<void> {
 }
 
 /** The sidecar summary the last run left, or undefined when no run has written one yet. */
-function statusOf(): { readonly indexedAt: number; readonly sessions: number } | undefined {
+function statusOf(root = fixture.indexRoot): { readonly indexedAt: number; readonly sessions: number } | undefined {
   try {
-    return JSON.parse(readFileSync(join(fixture.indexRoot, SessionsPlugin.STATUS_RELATIVE_PATH), 'utf8'))
+    return JSON.parse(readFileSync(join(root, SessionsPlugin.STATUS_RELATIVE_PATH), 'utf8'))
   } catch {
     return undefined
   }
@@ -226,5 +228,78 @@ describe('automatic index on session creation', () => {
 
     await settle(100)
     expect(statusOf()?.sessions).toBe(1)
+  })
+
+  it('does not start a second run while the first one is still in flight', async () => {
+    // The time window cannot deduplicate a slow run: the second session opens after the window while
+    // the first run still waits for the write lock. Only the in-flight set can skip it, and a
+    // skipped session must not produce a second run.
+    await writeSessionLog('session-aaaa')
+    await buildIndex()
+    // A short deadline is what makes a wrongly started second run observable: it would time out too.
+    const ctx = await mount({ config: { autoIndexMinIntervalMs: 10, autoIndexTimeoutMs: 200 } })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const release = await acquireIndexLock(fixture.indexRoot, { timeoutMs: 5_000, staleMs: 3_600_000 })
+    try {
+      emitAgentCreated(ctx, '/Users/admin/www/demo')
+      await settle(40) // past the window; the first run is still waiting behind the held lock
+      emitAgentCreated(ctx, '/Users/admin/www/demo')
+      // Wait for the first run's deadline, then give a wrongly started second run (40ms later) room
+      // to miss its own. Exactly one timeout proves the second session was skipped, not run.
+      await waitUntil(() => logged.mock.calls.length >= 1)
+      await settle(120)
+      expect(logged).toHaveBeenCalledTimes(1)
+      expect(String(logged.mock.calls[0]?.[0])).toContain('timed out')
+    } finally {
+      release()
+    }
+    // The aborted run settles once the lock is free, but must not release an entry it no longer owns.
+    await settle(250)
+    expect(logged).toHaveBeenCalledTimes(1)
+  })
+
+  it('runs again once the lock that stalled a timed-out run is released', async () => {
+    // The deadline's whole job is to make the root usable again, so the recovery needs a test: a run
+    // blocked on a held lock times out and drops its in-flight entry, and the next session must be
+    // the one that builds the index once the lock is finally gone.
+    await writeSessionLog('session-aaaa')
+    await buildIndex()
+    const ctx = await mount({ config: { autoIndexMinIntervalMs: 10, autoIndexTimeoutMs: 200 } })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const release = await acquireIndexLock(fixture.indexRoot, { timeoutMs: 5_000, staleMs: 3_600_000 })
+    try {
+      await writeSessionLog('session-bbbb')
+      emitAgentCreated(ctx, '/Users/admin/www/demo')
+      await waitUntil(() => logged.mock.calls.length >= 1)
+      expect(String(logged.mock.calls[0]?.[0])).toContain('timed out')
+      expect(statusOf()?.sessions).toBe(1)
+    } finally {
+      release()
+    }
+
+    // The timed-out run released its entry, and the aborted promise cannot write the index, so this
+    // second session is the one that has to produce `status.json`.
+    emitAgentCreated(ctx, '/Users/admin/www/demo')
+    await waitUntil(() => statusOf()?.sessions === 2)
+  })
+
+  it('releases the in-flight entry when a run fails, so the next session retries', async () => {
+    await writeSessionLog('session-aaaa')
+    // An index root that is a file: creating the write lock fails, so the run rejects before writing.
+    const blocked = join(fixture.work, 'blocked-index')
+    await writeFile(blocked, 'not a directory')
+    const ctx = await mount({ config: { indexRoot: blocked, autoIndexMinIntervalMs: 1 } })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    emitAgentCreated(ctx, '/Users/admin/www/demo')
+    await waitUntil(() => logged.mock.calls.length >= 1)
+    expect(String(logged.mock.calls[0]?.[0])).toContain('automatic index')
+
+    // A failure must not leave the root suppressed: make it usable and open another session.
+    await rm(blocked, { force: true })
+    await mkdir(blocked, { recursive: true })
+    await settle(10)
+    emitAgentCreated(ctx, '/Users/admin/www/demo')
+    await waitUntil(() => statusOf(blocked)?.sessions === 1)
   })
 })

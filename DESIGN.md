@@ -155,6 +155,7 @@ schema 见 `packages/service/src/schema.ts`（`SCHEMA_STATEMENTS`），三方共
 - `sessiongraph`：查询，`timeoutMs` 默认 30s
 - `sessiongraph_index`：建/刷新索引，默认 300s，独立预算
 - 系统提示段（`text` 函数形式）：告诉模型「查本地历史用 sessiongraph，别 grep 会话文件」
+- `agent/pre-step` 提示：用户最后一条亲手输入像历史问题时，每个会话追加一次很短的 `sessiongraph` 使用提示（`historyHint: false` 关闭）
 - 参数 schema 用 `@deepseek-ai/schemastery`
 
 ## 8. 验收
@@ -170,14 +171,16 @@ schema 见 `packages/service/src/schema.ts`（`SCHEMA_STATEMENTS`），三方共
 
 | 时机 | 机制 | 成本 | 作用 |
 |---|---|---|---|
-| 首次（还没有索引） | `agent/created` → `ctx.jobs` 后台**建库**（`autoBuild`，默认 true） | 秒级到分钟级（后台，不阻塞会话） | 装完即用，不需要人先跑一次命令 |
-| 会话创建（已有索引） | `agent/created` → `ctx.jobs` 后台增量 | 百毫秒级（后台） | 开新会话时把上个会话的内容补进来 |
+| 首次（还没有索引） | `agent/created` → 普通后台 promise **建库**（`autoBuild`，默认 true） | 秒级到分钟级（后台，不阻塞会话） | 装完即用，不需要人先跑一次命令 |
+| 会话创建（已有索引） | `agent/created` → 普通后台 promise 增量 | 百毫秒级（后台） | 开新会话时把上个会话的内容补进来 |
 | 查询前 | `status.json` 的 `indexedAt` 超过 `freshnessThresholdMs`（默认 5 分钟）→ 先增量再查 | 百毫秒级（同步，仅超阈值时） | 当前会话刚说过的话也能查到 |
 | 显式 | `sessiongraph_index` 工具 / 手动 | 全量（Rust 个位数秒 / TS 十几秒）或增量 | 强制刷新、脚本化场景 |
 
-**首建也走后台**：它要读全机日志，可能几十秒到几分钟，所以和增量一样交给 `ctx.jobs`，绝不阻塞会话创建。`autoBuild: false` 可以关掉它，回到「必须显式触发才建库」的严格行为；`autoIndex: false` 连增量也一并关掉。
+**首建也走后台**：它要读全机日志，可能几十秒到几分钟，所以和增量一样是普通后台 promise，绝不阻塞会话创建。两者都**不注册宿主 job**：注册后宿主会把完成通知注入会话、默认还会唤醒空闲 agent 多开一轮，没人要求的维护动作不该出现在对话里。只有显式索引调用（`sessiongraph_index` 工具或 `/sessiongraph index`）才走 `ctx.jobs`——两者都把调用方的 owner 传下去（`command.ts:413-418`），大库才转到后台 job。自动路径永远不是 job。`autoBuild: false` 可以关掉它，回到「必须显式触发才建库」的严格行为；`autoIndex: false` 连增量也一并关掉。
 
-**依赖**：自动路径需要宿主有 `jobs` 服务（用 `ctx.get` 探测，拿不到就静默跳过），并且只对「会话带 cwd」的情况触发。进程内每个 indexRoot 只触发一次，避免连开多个会话排队多次索引。
+**触发与去重**：只对「会话带 cwd」的情况触发。同一 indexRoot 有一个时间窗口（`autoIndexMinIntervalMs`，默认 60s）吸收 burst，窗口外再来会话就刷新；另有一个进程内 in-flight 集合，保证一个跨过窗口还没跑完的 run 不会被第二个会话重复启动（两个写者只会抢同一把写锁）。
+
+**每一轮都有 deadline**：自动刷新带 `autoIndexTimeoutMs`（默认 15 分钟）的 `AbortController`；超时会 abort、立刻释放 in-flight 记录并 `console.error`。没有它，一个永不 settle 的 run 会让该 root 的自动刷新被永久抑制——`finally` 正是这种 run 永远到不了的地方。
 
 **大库转后台**：`status.json` 的 `sessions` ≥ `backgroundIndexThreshold`（默认 1000）时，`sessiongraph_index` 走 `ctx.jobs.start`，工具立刻返回 job id 而不是占满 300s 预算。
 
@@ -196,7 +199,7 @@ DSH 内核已经有一整套会话查询设施，能用的直接用：
 | `ctx.sessionQuery.listSessions()` / `readSession(id)` | **用** | 拿到 `live: true` 的会话（当前还没落盘的），补「刚才说的话查不到」的断档；事件结构与 jsonl 同构，解析器直接复用 |
 | `ctx.sessionQuery.traceSession(id)` | 可选 | 我们自己也从 header 算 parentSession，够用 |
 | `ctx.sessionQuery.searchSessions()` / `searchEvents()` | **不用** | 它的 tokenizer 是 `unicode61`，无任何 CJK 处理（包里搜 `4e00`/`CJK`/`bigram` 零命中）。实测 `我今天在改广告SDK` 整句是一个 token，搜「广告」查不到。中文检索必须自建 bigram |
-| `ctx.jobs.start` | **用** | 自动增量、大库后台索引 |
+| `ctx.jobs.start` | **用** | 只有显式索引调用（`sessiongraph_index` 工具或 `/sessiongraph index`）的大库后台运行 |
 | `ctx.commands` | **用** | `/sessiongraph` 斜杠命令 |
 | `ctx.fs.watch` | 不用 | 见第 10 节 |
 

@@ -19,8 +19,10 @@
  * default true) so a fresh install becomes searchable without the user running anything. Those runs
  * are plain background promises, not host jobs: a registered job reports its settlement back to the
  * owning agent, which would put an unasked-for maintenance notice into the transcript and (under the
- * host's default `wakeup` delivery) open a turn of its own. `autoBuild: false` restores the stricter
- * behaviour where nothing is indexed until the caller asks for it.
+ * host's default `wakeup` delivery) open a turn of its own. Each run carries a deadline
+ * (`autoIndexTimeoutMs`, fifteen minutes by default) so a run that never settles releases its root
+ * instead of suppressing every later refresh. `autoBuild: false` restores the stricter behaviour
+ * where nothing is indexed until the caller asks for it.
  *
  * Sessions the host still holds in memory (`ctx.sessionQuery`) are indexed as well, in a second pass
  * after the file-path transaction commits: a conversation that is still running has no log on disk
@@ -98,6 +100,15 @@ export const DEFAULT_BACKGROUND_INDEX_THRESHOLD = 1_000
  */
 export const DEFAULT_MAX_LIVE_SESSIONS = 8
 
+/**
+ * Default deadline for one automatic refresh, fifteen minutes.
+ *
+ * A first build reads every log on the machine; without a bound, a run that never settles would hold
+ * its root in the in-flight set forever and every later session in that workspace would skip
+ * automatic refresh until the process restarts.
+ */
+export const DEFAULT_AUTO_INDEX_TIMEOUT_MS = 15 * 60 * 1000
+
 /** Engine selection: prefer the native kernel, only the TypeScript indexer, or decide per machine. */
 export type SessiongraphEngineSetting = 'auto' | 'native' | 'typescript'
 
@@ -170,6 +181,13 @@ export interface Config {
    */
   backgroundIndexThreshold?: number
   /**
+   * How long one automatic refresh may run before it is aborted and its index root released
+   * (default 900000, fifteen minutes). The deadline is the only way out of a run that never settles:
+   * the in-flight record it guards is process-local, so a wedged run would otherwise silence
+   * automatic refresh for that root until the process restarts.
+   */
+  autoIndexTimeoutMs?: number
+  /**
    * Most live (still-running) sessions to rebuild per run (default 8). They come from the host's
    * `ctx.sessionQuery` and are always rebuilt in full, so the cap bounds the replay cost.
    */
@@ -193,6 +211,7 @@ export const Config: z<Config> = z.object({
   autoBuild: z.boolean().default(true),
   indexLockStaleMs: z.number().default(300_000),
   backgroundIndexThreshold: z.number().default(DEFAULT_BACKGROUND_INDEX_THRESHOLD),
+  autoIndexTimeoutMs: z.number().default(DEFAULT_AUTO_INDEX_TIMEOUT_MS),
   maxLiveSessions: z.number().default(DEFAULT_MAX_LIVE_SESSIONS),
   engine: z.union([z.const('auto'), z.const('native'), z.const('typescript')]).default(DEFAULT_ENGINE),
 })
@@ -212,6 +231,7 @@ export function apply(ctx: Context, config: Config): void {
   assertPositiveInteger('maxFileBytes', resolved.maxFileBytes)
   assertPositiveInteger('backgroundIndexThreshold', resolved.backgroundIndexThreshold)
   assertPositiveInteger('maxLiveSessions', resolved.maxLiveSessions)
+  assertPositiveInteger('autoIndexTimeoutMs', resolved.autoIndexTimeoutMs)
   if (resolved.indexRoot.trim() === '') {
     throw new Error('sessiongraph-sessions: indexRoot must be a non-empty directory path')
   }
@@ -419,8 +439,10 @@ function scheduleAutoIndex(
     if (!existing && !config.autoBuild) return
     autoIndexRuns.set(indexRoot, now)
     autoIndexInFlight.add(indexRoot)
-    // Never rejects: a lost refresh is a degradation, not an error the session can act on.
-    void runAutomaticIndex(indexRoot, config).finally(() => autoIndexInFlight.delete(indexRoot))
+    // Never rejects: a lost refresh is a degradation, not an error the session can act on. The run
+    // releases its own in-flight entry, including in the timeout case where its promise may never
+    // settle, so this call site does not wrap it in another `finally`.
+    void runAutomaticIndex(indexRoot, config, autoIndexInFlight)
   } catch (error) {
     // A throwing listener would veto publication of the agent. Losing a refresh is a degradation,
     // never a reason to stop a session from starting; report once and carry on.
@@ -429,18 +451,50 @@ function scheduleAutoIndex(
 }
 
 /**
- * Run one automatic refresh to completion, reporting a failure instead of propagating it.
+ * Run one automatic refresh under a deadline, reporting a failure instead of propagating it.
  *
- * The run gets no abort signal of its own: nothing in the transcript can cancel it, and the write
- * lock makes an abandoned or duplicated run harmless. Session creation never waits on this promise.
+ * Session creation never waits on this promise. The run carries its own `AbortController` and an
+ * `autoIndexTimeoutMs` deadline: a run that ignores its signal may never settle, and the in-flight
+ * record it holds would then silence automatic refresh for this root for the life of the process.
+ * The timer therefore releases the root itself instead of leaving that to `finally`, which is
+ * exactly the code a run that never settles never reaches.
  * @param indexRoot - the index to refresh.
  * @param config - the resolved plugin configuration.
+ * @param autoIndexInFlight - roots with a run still executing; this run owns its own entry.
  */
-async function runAutomaticIndex(indexRoot: string, config: ResolvedConfig): Promise<void> {
+async function runAutomaticIndex(
+  indexRoot: string,
+  config: ResolvedConfig,
+  autoIndexInFlight: Set<string>,
+): Promise<void> {
+  const controller = new AbortController()
+  const timeoutMs = config.autoIndexTimeoutMs
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    // Released here, not in `finally`: a run that ignores its signal may never settle, which is the
+    // whole reason the deadline exists. Leaving it to `finally` would let the entry rot forever.
+    autoIndexInFlight.delete(indexRoot)
+    controller.abort()
+    console.error(
+      `sessiongraph-sessions: automatic index for ${indexRoot} timed out after ${String(timeoutMs)}ms`,
+    )
+  }, timeoutMs)
+  // A pending deadline must not keep a short-lived host process alive.
+  timer.unref()
   try {
-    await runIndex(indexRoot, {}, undefined, config)
+    await runIndex(indexRoot, {}, controller.signal, config)
   } catch (error) {
-    console.error(`sessiongraph-sessions: automatic index for ${indexRoot} failed: ${describeError(error)}`)
+    // "Timed out" and "the run threw" are different diagnoses, and the timer already reported the
+    // first one; this branch exists for the second.
+    if (!timedOut) {
+      console.error(`sessiongraph-sessions: automatic index for ${indexRoot} failed: ${describeError(error)}`)
+    }
+  } finally {
+    clearTimeout(timer)
+    // A timed-out run released its entry above, and by now that entry may belong to the run that
+    // took over; deleting it here would disable deduplication for the newer run.
+    if (!timedOut) autoIndexInFlight.delete(indexRoot)
   }
 }
 

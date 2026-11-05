@@ -103,9 +103,15 @@ Memory does not overlap with either: a conversation may **never enter memory** (
 
 Prefer to drive it yourself? `autoBuild: false` disables the first automatic build and `autoIndex: false` disables the incremental refreshes; everything then goes through `sessiongraph_index` / `/sessiongraph index`.
 
+**A run has a deadline.** Each automatic refresh is aborted after `autoIndexTimeoutMs` (fifteen minutes by default) and its index root released, so a run that never settles cannot suppress every later session's refresh.
+
 ### When the registry has a newer release
 
 **It says so once, after a tool runs.** A plugin cannot upgrade itself — it lives in a profile's dependency tree, and rewriting that tree is the host's job. So it does the next best thing: after one of its tools runs, it checks the registry in the background and, when the published version is newer than the running one, appends a notice to the next step of the conversation, where both the model and the user can see it. Three details keep it from turning into noise: the check only ever happens *after* a tool was used; a release is announced once, with `notifiedVersion` persisted so a desktop restart does not replay it; and checks run at most every six hours, while an unreachable registry, a timeout, or an unwritable state file all mean "nothing to report" rather than an error. The registry follows npm's own resolution order — `npm_config_registry`, then `registry=` in the user's `~/.npmrc`, then npm's public default — so a machine behind a mirror checks the mirror it actually installs from. `updateCheck: false` turns the whole thing off, and `updateCheckIntervalMs` changes the interval.
+
+### A nudge for history questions
+
+The system prompt already says to search the index instead of grepping compressed logs. This release adds the moment-of-use reminder: when the last message the user typed reads like a question about past conversations (`上次`, `之前`, `昨天`, `last time`, …) and this conversation has not used either tool yet, the plugin appends one short notice to that model request pointing at `sessiongraph`. Three rules keep it quiet: only a message whose source is the user's own typing can trigger it (injected context, tool results and other plugins' notices are ignored, so the reminder cannot trigger itself); it speaks at most once per conversation; and it never speaks after `sessiongraph` or `sessiongraph_index` has run. `historyHint: false` turns it off.
 
 ### What gets indexed
 
