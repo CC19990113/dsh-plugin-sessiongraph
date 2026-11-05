@@ -20,6 +20,12 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # One version has to agree across the JS packages, the platform addons, the
+      # addon pins, the lockfile and the minimumReleaseAgeExclude list. This gate
+      # fails here, before anything is published, rather than mid-release.
+      - name: Release version gate
+        run: pnpm run check:versions
+
       # `tsc -b` is the only static gate: strict, noUnusedLocals/Parameters.
       # It also builds `lib/`, which the tests import through the paths facade.
       - name: Typecheck
