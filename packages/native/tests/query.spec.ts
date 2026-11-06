@@ -26,7 +26,13 @@ import { loadNative } from '../src/index.ts'
  */
 const kernel = loadNative()
 const canQuery = typeof kernel?.query === 'function'
-const skipWithoutKernel = !canQuery && process.env.CI === undefined
+/**
+ * Only a job that built the kernel from this checkout sets this. `CI` alone is the wrong signal:
+ * `publish.yml` runs its tests *after* publishing the platform packages, so a registry that has not
+ * propagated them yet would fail an entire release over a binary that run was never meant to build.
+ */
+const requireKernel = process.env.SESSIONGRAPH_REQUIRE_KERNEL === '1'
+const skipWithoutKernel = !canQuery && !requireKernel
 
 let work: string
 let sessionsRoot: string
@@ -189,11 +195,12 @@ function normalize(value: unknown): unknown {
 }
 
 describe('native query kernel', () => {
-  it('has a usable query kernel whenever CI is set', () => {
-    // Locally a missing `.node` is a normal state; CI must build it, so silently skipping there
-    // would report a green run that never exercised the kernel at all.
-    if (process.env.CI === undefined) return
-    expect(canQuery, 'CI must build the native kernel before running the query tests').toBe(true)
+  it('has a usable query kernel when the job requires one', () => {
+    // A missing `.node` is a normal local state, and a CI job that never built one would otherwise
+    // report a green run that never exercised the kernel — so the job that does build it opts in
+    // through `SESSIONGRAPH_REQUIRE_KERNEL` instead of every CI run failing on its absence.
+    if (!requireKernel) return
+    expect(canQuery, 'SESSIONGRAPH_REQUIRE_KERNEL=1 but no native kernel was loaded').toBe(true)
   })
 
   it.skipIf(skipWithoutKernel)('is exposed by the same loader as the indexer', async () => {

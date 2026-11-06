@@ -93,3 +93,9 @@ jobs:
       # a green no-op.
       - name: Compare the native kernel against the TypeScript store
         run: pnpm vitest run packages/native/tests
+        env:
+          # This job built the kernel from this checkout, so a run that cannot load it is a real
+          # failure. `publish.yml` deliberately does not set it: it tests after publishing the
+          # platform packages, where a registry that has not propagated them yet would fail a
+          # release over a binary that run was never meant to build.
+          SESSIONGRAPH_REQUIRE_KERNEL: '1'
