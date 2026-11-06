@@ -75,6 +75,9 @@ importers:
       dsh-plugin-sessiongraph-indexer-linux-arm64-gnu:
         specifier: 0.2.0
         version: 0.2.0
+      dsh-plugin-sessiongraph-indexer-linux-x64-gnu:
+        specifier: 0.2.0
+        version: 0.2.0
       dsh-plugin-sessiongraph-indexer-win32-x64-msvc:
         specifier: 0.2.0
         version: 0.2.0
@@ -518,22 +521,27 @@ packages:
     engines: {node: '>=8'}
 
   dsh-plugin-sessiongraph-indexer-darwin-arm64@0.2.0:
-    resolution: {integrity: sha512-riLCMbU9nu5qGR0aX4lWO/4cC2/qpNzXoIHmmeS/RUYeG4MEhEv356s3ZB/ai7swSm4oj0MN60NILaqeGdzP2g==}
+    resolution: {integrity: sha512-S0ntojJwACj9SmOcvnM/0RLI9lJYaVnNeK2R+e37U+wUpScBU0NJEVpYXU5ETOaDb3zeD+B2bAdVcKDjVYr4YA==}
     cpu: [arm64]
     os: [darwin]
 
   dsh-plugin-sessiongraph-indexer-darwin-x64@0.2.0:
-    resolution: {integrity: sha512-MGP+qziJE4a2eG6JDNQRD26FTEal9OYml72TaTbkMDCDlzS8qqN9LsRwiYOj1B9M3QRqRY6H+HgIMZUOAGiJag==}
+    resolution: {integrity: sha512-WwUVyEuJ9KVTVBzEAWiHhZLWChtk2YypuA8+gnjN3kLC6tpckaDmAe66XH8brIuwK/4Qbn76woEtt9BnUifuuQ==}
     cpu: [x64]
     os: [darwin]
 
   dsh-plugin-sessiongraph-indexer-linux-arm64-gnu@0.2.0:
-    resolution: {integrity: sha512-qGjnsvflTTik6FvQRKnBa/PantfwBhjRWCdrQuK8dMM2kZPP8iy4ePEXbLqt9S8aSQAiwcICD79sC7/f8KMCfQ==}
+    resolution: {integrity: sha512-gWXWwqf9rReIcqtJuYXytWxIg23GxksC23gaf2X4uPkad8FXFzHZC4lkew2Zvm8KpeMOBxnYutxcUrJnllSnpA==}
     cpu: [arm64]
     os: [linux]
 
+  dsh-plugin-sessiongraph-indexer-linux-x64-gnu@0.2.0:
+    resolution: {integrity: sha512-qVSqj8utc6VCK3Kq/ZyLaxjlFgpIGFXmQNJNhdEmQ5Qm2uMCfJKWUe+RpnGVgWgAbG53nAcoddUDr9yoaEx4tQ==}
+    cpu: [x64]
+    os: [linux]
+
   dsh-plugin-sessiongraph-indexer-win32-x64-msvc@0.2.0:
-    resolution: {integrity: sha512-+P8uhlpkhoUOZx2ecUNhT2qIxYOV6jGrT5SGRdHZfYxHqnYJYtt7Zxq+s4eEIcYsCauf50B7ojCeddht4s6pNA==}
+    resolution: {integrity: sha512-hjVjUwJFy/s4jcPKBleeURjQYRBABmp/CJQIw7KfrxlbpiZw1p9Jo3+9pV1y1Q4oRrsgl+M5iirGnS4VPjNL/g==}
     cpu: [x64]
     os: [win32]
 
@@ -1137,6 +1145,9 @@ snapshots:
     optional: true
 
   dsh-plugin-sessiongraph-indexer-linux-arm64-gnu@0.2.0:
+    optional: true
+
+  dsh-plugin-sessiongraph-indexer-linux-x64-gnu@0.2.0:
     optional: true
 
   dsh-plugin-sessiongraph-indexer-win32-x64-msvc@0.2.0:
