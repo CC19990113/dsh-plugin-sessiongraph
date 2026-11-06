@@ -11,10 +11,11 @@
 | 包 | 角色 |
 |---|---|
 | `service` | 定义 `ctx.sessiongraph` 缝隙：查询词汇、store/indexer 注册表、schema v1、中文 bigram 分词器 |
-| `sqlite` | 读 provider：从 `index.db` 回答五个查询 |
-| `sessions` | 写 provider：扫描会话日志 → 逐帧解压 → 抽取条目 → 写库（TypeScript 与 Rust 双引擎） |
-| `tool` | 消费者：两个模型工具 + `/sessiongraph` 命令 + 系统提示段 |
-| `native` | Rust 内核的加载器（加载失败返回 `undefined`，绝不抛） |
+| `sqlite` | 读 provider：从 `index.db` 回答七个查询，并在 native / TypeScript 两套引擎间路由 |
+| `sessions` | 写 provider：扫描会话日志 → 逐帧解压 → 抽取条目 → 写库（TypeScript 与 Rust 双引擎）；另有 `raw.ts` 回读未删节事件 |
+| `tool` | 消费者：**一个** `sessiongraph` 工具（八个 operation）+ `/sessiongraph` 命令 + 系统提示段 + 设置页 HTTP 路由 + 工具可见性 |
+| `native` | Rust 内核：索引写入（`indexSessions`）与查询（`query`），加载失败返回 `undefined`，绝不抛 |
+| `panel` | 纯浏览器半侧：设置页「会话检索」页签（`dsh.client`，宿主入口是空 apply） |
 | `bundle` | 安装元包：`cordis.patch.yml` |
 
 **路由是「恰好一个认领者」，不是首个匹配。** 每次查询并发询问所有 store，0 个或多个认领者都抛错（`SESSIONGRAPH_UNAVAILABLE` / `SESSIONGRAPH_CONFLICT`），所以注册顺序和热重载永远不影响结果。`status` 是唯一在没有 store 时也能回答的操作 —— 从没建过库的人需要知道这个事实，而不是收到和其他操作一样的失败。
@@ -48,6 +49,8 @@
 
 一句话：**记忆回答「结论是什么」，内置检索回答「哪个会话提到过」，sessiongraph 回答「当时到底说了什么」。**
 
+从 0.2.0 起这三者不再需要模型自己取舍：设置页默认就把内核那五个 `session_*` 工具对模型隐藏，只留 `sessiongraph`（见下文「设置页：用哪套会话工具」）。想换回去随时切。
+
 三点实际差别：
 
 - **中文**：内置检索对中文基本不可用（分词器没有 CJK 处理），sessiongraph 专为中文两字词设计
@@ -70,15 +73,43 @@
 
 `sessiongraph`：
 
+**一个工具，八个 operation。** 从 0.2.0 起，索引不再是独立工具（`sessiongraph_index` 已删除）。
+
 | operation | 作用 |
 |---|---|
-| `search` | 跨会话全文检索，可按 `workspace` / `after` / `before` / `kinds` 过滤；返回标题、工作区、时间、轮次、命中片段（`[词]` 高亮） |
+| `search` | 跨会话全文检索，可按 `sessionId` / `workspace` / `after` / `before` / `kinds` 过滤；默认同一会话只留最强命中（`dedupeBySession: false` 关闭）；返回标题、工作区、时间、轮次、命中片段（`[词]` 高亮） |
 | `session` | 按完整 id 或唯一前缀打开一个会话：元信息 + 有序条目 + 子会话 |
+| `event` | 读**一条未删节的原始事件**（走源日志，不是索引里的裁剪文本），可带 `windowBefore` / `windowAfter` 前后窗口 |
+| `trace` | 无 `seq` → 会话血缘（祖先链 + 递归后代树）；有 `seq` → 该事件的替换链、遮蔽范围与引用源事件 |
 | `timeline` | 按时间列会话（可过滤工作区），新→旧 |
 | `workspaces` | 工作区清单与统计 |
 | `status` | 索引自身状态；**唯一在无索引时也能回答的操作** |
+| `index` | 建或刷新索引，与查询共用 30s 工具预算；源文件 mtime+size 未变就跳过，会话攒到 1000+ 时转后台 job 并返回 jobId |
 
-`sessiongraph`（operation `index`）：建或刷新索引，与查询共用 30s 工具预算；源文件 mtime+size 未变就跳过，会话攒到 1000+ 时转后台 job 并返回 jobId。
+参数一律 **snake_case**（`session_id` / `window_before` / `dedupe_by_session`），与宿主自带工具一致。
+
+排序按 `bm25 / 权重`：`user 1.0 / title 1.1 / assistant 1.2 / tool 1.5`。FTS5 的 bm25 是负数，所以**除以**权重才是降权 —— 乘法反而会把工具调用顶到最前面。
+
+### 设置页：用哪套会话工具
+
+设置 → **会话检索**，一个三选一下拉：
+
+| 选项 | 效果 |
+|---|---|
+| `sessiongraph`（默认） | 隐藏宿主自带的 `session_search` / `session_event_search` / `session_trace` / `session_event_trace` / `session_event_read`，只留 `sessiongraph` |
+| `kernel` | 反过来：隐藏 `sessiongraph`，只留宿主那五个 |
+| `both` | 两套都暴露。模型可能同一件事查两遍，也更占上下文 |
+
+切换**立即生效，不用重启**。实现是宿主的 `agent.ctx.tools.restrict({ deny })`（按 agent 作用域遮蔽，被隐藏的工具连 schema 都不进请求），加一段 per-agent 的系统提示覆盖。选择落在 `<indexRoot>/panel.json`，重启后读回。
+
+### 查询引擎
+
+读路径有两套实现，同一个 `index.db`：
+
+- **原生（Rust）**：`rusqlite` 只读打开，复用索引时的同一份中文 bigram 分词器，一次 napi 调用返回 JSON
+- **TypeScript**：`node:sqlite`
+
+`engine: auto`（默认）优先原生，缺二进制或调用失败时静默回退 TypeScript 并只记一次日志。真实库（700+ 会话）实测单次 `search`：Rust **3.5–4 ms**、TypeScript **22 ms**。两套实现有逐 operation 对拍测试（11 种请求形态结果全等）。
 
 ### 命令
 

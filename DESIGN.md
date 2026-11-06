@@ -116,15 +116,28 @@ schema 见 `packages/service/src/schema.ts`（`SCHEMA_STATEMENTS`），三方共
 
 ## 4. 查询词汇
 
-`SessiongraphRequest` 判别联合（`packages/service/src/types.ts`），五个操作：
+`SessiongraphRequest` 判别联合（`packages/service/src/types.ts`），**七个**查询操作：
 
 | operation | 作用 |
 |---|---|
-| `search` | 全文检索，可按 `workspace` / `after` / `before` / `kinds` 过滤，返回命中列表（含片段） |
+| `search` | 全文检索，可按 `sessionId` / `workspace` / `after` / `before` / `kinds` 过滤，默认同会话去重（`dedupeBySession`），返回命中列表（含片段） |
 | `session` | 按完整 id 或唯一前缀读一个会话（元信息 + 有序 entries + 子会话） |
+| `event` | 读一条**未删节**的原始事件（回读源日志，不读索引里的裁剪文本）+ 可选前后窗口 |
+| `trace` | 无 `seq` → 会话血缘（祖先链 + 递归后代树，`complete` 区分「根」与「走不动」）；有 `seq` → 事件替换链 / 遮蔽范围 / 引用源事件 |
 | `timeline` | 按时间列会话（可过滤 workspace），新→旧 |
 | `workspaces` | 工作区清单与统计（会话数、条目数、时间跨度） |
 | `status` | 索引自身状态；**唯一**在无索引时也返回结果的操作 |
+
+**`index` 不在这七个里面。** 它是写操作，由工具层直接调 `ctx.sessiongraph.index()`；放进查询
+联合会让「只读 provider」这个约定失效。
+
+### 排序权重
+
+`ORDER BY bm25(entry_fts) / w(kind)`，`user 1.0 / title 1.1 / assistant 1.2 / tool 1.5`。
+
+**必须除以权重，不能乘。** FTS5 的 bm25 是负数（越负越好），乘法等于给大权重加分 —— 实测
+top20 会全部变成 `tool/call`，正好和「用户输入优先」相反。Rust 内核必须用同一份权重表与同样的
+除法，否则两条路径的排序会静默分叉。
 
 服务类：`packages/service/src/index.ts` 的 `Sessiongraph`（`ctx.sessiongraph`），
 「exactly one claimant」路由：`indexes()` / `canIndex()` 并发询问所有 provider，0 个或多个都抛错。
@@ -133,14 +146,40 @@ schema 见 `packages/service/src/schema.ts`（`SCHEMA_STATEMENTS`），三方共
 
 | 包 | 职责 | 只写这些文件 |
 |---|---|---|
-| `service`（已完成，**不要改**） | 契约、schema、tokenizer、seam | — |
-| `sessions`（indexer） | 扫描 + zstd 解压 + JSONL 解析 + 写 `index.db` | `packages/sessions/**` |
-| `sqlite`（store） | 读 `index.db`，实现五个查询 | `packages/sqlite/**` |
-| `tool`（consumer） | `sessiongraph` / `sessiongraph` (operation `index`) 两个模型工具 + 系统提示段 | `packages/tool/**` |
+| `service`（契约） | 契约、schema、tokenizer、seam | — |
+| `sessions`（indexer） | 扫描 + zstd 解压 + JSONL 解析 + 写 `index.db` + `raw.ts` 未删节事件回读 | `packages/sessions/**` |
+| `sqlite`（store） | 读 `index.db`，实现七个查询；`native-query.ts` 做 native/TS 引擎路由 | `packages/sqlite/**` |
+| `native`（引擎） | 暴露 Rust 内核：`indexSessions`（写）+ `query`（读） | `packages/native/**` |
+| `tool`（consumer） | **一个** `sessiongraph` 工具（八个 operation）+ 系统提示段 + `panel.ts`（HTTP 路由）+ `visibility.ts`（工具可见性） | `packages/tool/**` |
+| `panel`（客户端） | 设置页「会话检索」：`lib/host.js` 空 apply + `lib/client.js` CJS factory | `packages/panel/**` |
 | `bundle` | `cordis.patch.yml` | `packages/bundle/**` |
+| `crates/sessiongraph-core` | Rust 内核（napi）：索引写入 + 七个查询 | `crates/**` |
 
 三个实现包都导出 `name` / `inject` / `apply`（Cordis 命名空间插件，`apply` 内注册 provider），
 以及 `invariant.ts` 伴生插件（照 `packages/service/src/invariant.ts` 的形状）。
+
+### 查询引擎
+
+读路径有两套实现，读同一个 `index.db`：Rust（`rusqlite` + 复用索引时的 tokenize.rs）与
+TypeScript（`node:sqlite`）。`engine: auto | native | typescript`，auto 优先原生、失败静默回退
+TS 并只记一次日志 —— 与 sessions 索引器的 native 回退策略同一套语义。对拍由
+`packages/native/tests/query.spec.ts` 保证（逐 operation 与 TS 结果比对）。
+
+实测（700+ 会话真实库，单次 search）：Rust 3.5–4 ms，TypeScript 22 ms。
+
+### 工具可见性（设置页）
+
+`packages/tool/src/visibility.ts` 用宿主的 `agent.ctx.tools.restrict({ deny })` 按 agent 遮蔽另一
+套会话工具，并用 `agent.ctx.systemPrompt.section({ name: 'tool:session-query' })` 覆盖内核那段
+固定提示词。三态 `toolSet: 'sessiongraph' | 'kernel' | 'both'`，存 `<indexRoot>/panel.json`。
+
+两条实现约束：
+
+- 必须是**无条件**订阅 `agent/created`。条件式（apply 时先查 `tools.view` 判断名字在不在）在
+  bundle 加载顺序不确定时会静默失效 —— 插件先 apply、内核工具后注册，就永远不订阅、永远不
+  deny，而且没有任何提示。
+- 服务的读取必须走 **`ctx.get(name)`**。Cordis 对没 inject 的服务，`ctx.<service>` 是**抛错**不是
+  返回 `undefined`，直接属性访问会炸掉 agent 创建（`cannot get property "agents" without inject`）。
 
 ## 6. 索引器约束
 

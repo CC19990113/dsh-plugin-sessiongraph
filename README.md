@@ -11,10 +11,11 @@ Six packages behind one strict seam: **adding a store or an indexer never touche
 | Package | Role |
 |---|---|
 | `service` | Defines the `ctx.sessiongraph` seam: query vocabulary, store/indexer registries, schema v1, the Chinese bigram tokenizer |
-| `sqlite` | Read provider: answers the five queries from `index.db` |
-| `sessions` | Write provider: scan session logs, decode frame by frame, extract entries, write the database (TypeScript and Rust engines) |
-| `tool` | Consumer: the two model tools, the `/sessiongraph` command, and the system-prompt section |
-| `native` | Loader for the Rust kernel (returns `undefined` on any failure, never throws) |
+| `sqlite` | Read provider: answers the seven queries from `index.db`, routing between the native and TypeScript engines |
+| `sessions` | Write provider: scan session logs, decode frame by frame, extract entries, write the database (TypeScript and Rust engines); `raw.ts` reads unabridged events back |
+| `tool` | Consumer: **one** `sessiongraph` tool (eight operations), the `/sessiongraph` command, the system-prompt section, the settings HTTP route, and tool visibility |
+| `native` | Rust kernel: index writes (`indexSessions`) and queries (`query`); returns `undefined` on any failure, never throws |
+| `panel` | Browser half only: the settings "会话检索" tab (`dsh.client`; the host entry is an empty apply) |
 | `bundle` | Installable meta-package: `cordis.patch.yml` |
 
 **Routing is "exactly one claimant", never first match.** Every registered store is asked concurrently on each query; zero claimants and several claimants both throw (`SESSIONGRAPH_UNAVAILABLE` / `SESSIONGRAPH_CONFLICT`). Registration order and hot reload therefore never change the result. `status` is the one operation that answers with no store at all — someone who has never built an index needs to learn that fact, not receive the same failure every other operation raises.
@@ -48,6 +49,8 @@ The same question has three homes, and picking the wrong one means finding nothi
 
 In one line: **memory answers "what is the conclusion", the built-in search answers "which session mentioned it", sessiongraph answers "what was actually said".**
 
+Since 0.2.0 the model no longer has to choose: the settings page hides the host's five `session_*` tools by default and leaves only `sessiongraph` (see "Settings: which session tools the model sees"). Switch back any time.
+
 Three differences that matter in practice:
 
 - **Chinese**: the built-in search is effectively unusable for Chinese (its tokenizer has no CJK handling); sessiongraph is built for two-character Chinese terms
@@ -70,15 +73,43 @@ Memory does not overlap with either: a conversation may **never enter memory** (
 
 `sessiongraph`:
 
+**One tool, eight operations.** Since 0.2.0 indexing is no longer a separate tool (`sessiongraph_index` is gone).
+
 | Operation | What it does |
 |---|---|
-| `search` | Cross-session full-text search; filters on `workspace` / `after` / `before` / `kinds`. Returns title, workspace, time, turn and a highlighted snippet |
+| `search` | Cross-session full-text search; filters on `sessionId` / `workspace` / `after` / `before` / `kinds`. One hit per session by default (`dedupeBySession: false` to disable). Returns title, workspace, time, turn and a highlighted snippet |
 | `session` | Open one session by full id or unique prefix: metadata, ordered entries, child sessions |
+| `event` | Read **one unabridged raw event** from the source log (not the index's clipped text), with optional `windowBefore` / `windowAfter` neighbours |
+| `trace` | Without `seq`: session lineage (ancestor chain + recursive descendant tree). With `seq`: that event's replacement chain, shadowed range and cited source events |
 | `timeline` | List sessions newest-first, optionally scoped to a workspace |
 | `workspaces` | Workspace inventory with session/entry counts |
 | `status` | The index's own state — **the only operation that answers before an index exists** |
+| `index` | Build or refresh inside the shared 30-second tool budget; unchanged sources are skipped, and past a thousand sessions the run becomes a host background job returning a job id |
 
-`sessiongraph` (operation `index`): build or refresh inside the shared 30-second tool budget; sessions whose source mtime and size are unchanged are skipped, and past a thousand sessions the run becomes a host background job returning a job id.
+Tool parameters are **snake_case** (`session_id`, `window_before`, `dedupe_by_session`), matching the built-in tools.
+
+Ranking is `bm25 / weight` with `user 1.0 / title 1.1 / assistant 1.2 / tool 1.5`. FTS5's bm25 is negative, so **dividing** by the weight demotes — multiplying would push tool calls to the top.
+
+### Settings: which session tools the model sees
+
+Settings → **会话检索** (Session search), a three-way dropdown:
+
+| Choice | Effect |
+|---|---|
+| `sessiongraph` (default) | Hides the host's `session_search` / `session_event_search` / `session_trace` / `session_event_trace` / `session_event_read`, keeping only `sessiongraph` |
+| `kernel` | The reverse: hides `sessiongraph`, keeps the host's five |
+| `both` | Exposes both. The model may check the same thing twice, and it costs more context |
+
+Switching is **immediate, no restart**. It works through the host's `agent.ctx.tools.restrict({ deny })` (a per-agent restriction — a hidden tool's schema never enters the request) plus a per-agent system-prompt override. The choice lands in `<indexRoot>/panel.json` and is read back on start.
+
+### Query engines
+
+Two implementations read the same `index.db`:
+
+- **Native (Rust)**: `rusqlite` opened read-only, reusing the same Chinese bigram tokenizer the indexer uses, one napi call returning JSON
+- **TypeScript**: `node:sqlite`
+
+`engine: auto` (the default) prefers native and falls back to TypeScript silently — logging once — when the binary is missing or a call throws. Measured on a real 700+ session index, one `search`: Rust **3.5–4 ms**, TypeScript **22 ms**. The two are held together by per-operation parity tests (11 request shapes, identical results).
 
 ### Commands
 
