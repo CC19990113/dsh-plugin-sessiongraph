@@ -206,6 +206,8 @@ export interface SessiongraphTimelineRequest extends SessiongraphRequestBase {
   before?: number
   /** Maximum sessions to return, newest first. */
   limit: number
+  /** Sessions to skip, for paging; follows the timeline's newest-first order. */
+  offset?: number
 }
 
 /** Answer to a timeline request. */
@@ -221,6 +223,8 @@ export interface SessiongraphWorkspacesRequest extends SessiongraphRequestBase {
   operation: 'workspaces'
   /** Maximum workspaces to return, most recently active first. */
   limit: number
+  /** Workspaces to skip, for paging; follows the most-recently-active-first order. */
+  offset?: number
 }
 
 /** One workspace's coverage. */

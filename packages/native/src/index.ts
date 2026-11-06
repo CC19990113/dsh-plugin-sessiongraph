@@ -199,20 +199,6 @@ export function loadNative(): NativeKernel | undefined {
 }
 
 /**
- * Ask the native kernel one question, when this machine has one that can answer.
- *
- * `query` is optional on the kernel surface, so this returns `undefined` for a build that predates the
- * export — the same signal `loadNative()` returning `undefined` gives for a machine with no build.
- * @param request - the snake_case request the Rust side declares.
- * @returns the response envelope, or `undefined` when no usable kernel is present.
- */
-export function query(request: NativeQueryRequest): Promise<NativeQueryResponse> | undefined {
-  const kernel = loadNative()
-  if (kernel?.query === undefined) return undefined
-  return kernel.query(request)
-}
-
-/**
  * Candidate module specifiers for the built binary, most local first.
  * @returns specifiers to probe in order.
  */

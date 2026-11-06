@@ -5,7 +5,7 @@ import { zstdCompressSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
 import { SessiongraphError } from 'dsh-plugin-sessiongraph-service'
 import { IndexPool } from '../src/database.ts'
-import { event, search, trace } from '../src/queries.ts'
+import { event, search, timeline, trace, workspaces } from '../src/queries.ts'
 import { seedIndex } from './fixture.ts'
 import type { SeedIndex, SeedSession } from './fixture.ts'
 
@@ -203,6 +203,61 @@ describe('search dedupe and kind weights', () => {
     // `bm25` is negative, so the kind weight is a divisor: user (1.0) outranks assistant (1.2), which
     // outranks tool (1.5). Multiplying by the weight would invert this, which is why it is a penalty.
     expect(result.hits.map(hit => hit.kind)).toEqual(['user', 'assistant', 'tool'])
+  })
+})
+
+describe('timeline and workspaces paging', () => {
+  const PAGES: SeedIndex = {
+    sessions: [
+      { id: 'page0001-0000-4000-8000-000000000001', workspace: '/w/a', createdAt: 1_000, lastAt: 5_000, entries: [] },
+      { id: 'page0002-0000-4000-8000-000000000002', workspace: '/w/b', createdAt: 1_000, lastAt: 4_000, entries: [] },
+      { id: 'page0003-0000-4000-8000-000000000003', workspace: '/w/a', createdAt: 1_000, lastAt: 3_000, entries: [] },
+      { id: 'page0004-0000-4000-8000-000000000004', workspace: '/w/c', createdAt: 1_000, lastAt: 2_000, entries: [] },
+      { id: 'page0005-0000-4000-8000-000000000005', workspace: '/w/b', createdAt: 1_000, lastAt: 1_000, entries: [] },
+    ],
+  }
+
+  it('pages timeline sessions without repeating or dropping one', async () => {
+    const root = await project(PAGES)
+    const db = connection(root)
+    const all = timeline(db, { operation: 'timeline', indexRoot: root, limit: 10 })
+    const expected = all.sessions.map(session => session.sessionId)
+    expect(expected).toHaveLength(5)
+
+    const pages = [
+      timeline(db, { operation: 'timeline', indexRoot: root, limit: 2 }),
+      timeline(db, { operation: 'timeline', indexRoot: root, limit: 2, offset: 2 }),
+      timeline(db, { operation: 'timeline', indexRoot: root, limit: 2, offset: 4 }),
+    ]
+    const paged = pages.flatMap(page => page.sessions.map(session => session.sessionId))
+    expect(paged).toEqual(expected)
+    expect(new Set(paged).size).toBe(5)
+    expect(pages.map(page => page.truncated)).toEqual([true, true, false])
+
+    // An offset past the end is an empty page, not an error.
+    const beyond = timeline(db, { operation: 'timeline', indexRoot: root, limit: 2, offset: 10 })
+    expect(beyond.sessions).toEqual([])
+    expect(beyond.truncated).toBe(false)
+  })
+
+  it('pages workspaces without repeating or dropping one', async () => {
+    const root = await project(PAGES)
+    const db = connection(root)
+    const all = workspaces(db, { operation: 'workspaces', indexRoot: root, limit: 10 })
+    const expected = all.workspaces.map(workspace => workspace.workspace)
+    expect(expected).toEqual(['/w/a', '/w/b', '/w/c'])
+    expect(all.total).toBe(3)
+
+    const pages = [0, 1, 2].map(offset =>
+      workspaces(db, { operation: 'workspaces', indexRoot: root, limit: 1, offset }),
+    )
+    expect(pages.flatMap(page => page.workspaces.map(workspace => workspace.workspace))).toEqual(expected)
+    // `total` is the pre-pagination count, not the page size.
+    expect(pages.map(page => page.total)).toEqual([3, 3, 3])
+
+    const beyond = workspaces(db, { operation: 'workspaces', indexRoot: root, limit: 1, offset: 10 })
+    expect(beyond.workspaces).toEqual([])
+    expect(beyond.total).toBe(3)
   })
 })
 

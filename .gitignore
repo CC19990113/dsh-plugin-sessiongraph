@@ -1,5 +1,11 @@
 node_modules/
-lib/
+# Compiled TypeScript output. `packages/panel/lib` holds hand-written client source,
+# not build output, so name the five build packages rather than every `lib/` directory.
+packages/native/lib/
+packages/service/lib/
+packages/sessions/lib/
+packages/sqlite/lib/
+packages/tool/lib/
 coverage/
 *.tsbuildinfo
 .DS_Store

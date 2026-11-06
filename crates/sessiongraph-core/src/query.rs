@@ -455,10 +455,12 @@ fn search(connection: &Connection, request: &QueryRequest) -> QResult<Value> {
     let mut clipped = false;
     let mut hits = Vec::with_capacity(page.len());
     for row in &page {
+        // An entry whose session row vanished (an index written by an interrupted run, or one a
+        // concurrent rebuild replaced) cannot be rendered: the join in `read_hit_details` drops it.
+        // Skipping the hit keeps the rest of the page answerable, which is what the TypeScript store
+        // does; calling the whole answer corrupt would turn one orphan row into a failed search.
         let Some(detail) = details.get(&row.id) else {
-            return Err(corrupt(
-                "the index changed while it was being read; a matched entry disappeared",
-            ));
+            continue;
         };
         validate_kind(&detail.kind)?;
         let units: Vec<u16> = detail.text.encode_utf16().collect();
@@ -1074,11 +1076,13 @@ fn timeline(connection: &Connection, request: &QueryRequest) -> QResult<Value> {
     } else {
         format!("WHERE {}", filters.join(" AND "))
     };
-    // One extra row distinguishes "exactly `limit` sessions" from "there are more".
+    // One extra row distinguishes "exactly `limit` sessions" from "there are more". `offset` skips
+    // whole sessions in the same newest-first order, so a second page neither repeats nor drops one.
     values.push(SqlValue::Integer(as_sql_int(limit.saturating_add(1))));
+    values.push(SqlValue::Integer(as_sql_int(bound(request.offset))));
     let sql = format!(
         "SELECT {SESSION_COLUMNS_S} FROM session s {where_clause}
-          ORDER BY s.last_at DESC, s.id ASC LIMIT ?"
+          ORDER BY s.last_at DESC, s.id ASC LIMIT ? OFFSET ?"
     );
     let rows = session_rows(connection, &sql, params_from_iter(values.iter()))?;
     let truncated = rows.len() > limit;
@@ -1111,19 +1115,22 @@ fn workspaces(connection: &Connection, request: &QueryRequest) -> QResult<Value>
                    FROM session
                   GROUP BY workspace
                   ORDER BY max(last_at) DESC, workspace ASC
-                  LIMIT ?1",
+                  LIMIT ?1 OFFSET ?2",
             )
             .map_err(|error| corrupt(format!("workspaces: {error}")))?;
         let rows = statement
-            .query_map(params![as_sql_int(limit)], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            })
+            .query_map(
+                params![as_sql_int(limit), as_sql_int(bound(request.offset))],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
             .map_err(|error| corrupt(format!("workspaces: {error}")))?;
         for row in rows {
             let (workspace, sessions, entries, first_at, last_at) =
@@ -2379,6 +2386,124 @@ mod tests {
         assert!(first["entries"].is_number());
         assert!(first["firstAt"].is_number());
         assert!(first["lastAt"].is_number());
+    }
+
+    /// Offset pages for timeline and workspaces: consecutive pages neither repeat nor drop a row.
+    #[test]
+    fn timeline_and_workspaces_page_without_repeats_or_gaps() {
+        let fixture = fixture();
+        let root = seed(&fixture);
+
+        fn session_ids(answer: &Value) -> Vec<String> {
+            answer["sessions"]
+                .as_array()
+                .expect("sessions")
+                .iter()
+                .map(|session| session["sessionId"].as_str().expect("id").to_owned())
+                .collect()
+        }
+
+        fn workspace_ids(answer: &Value) -> Vec<String> {
+            answer["workspaces"]
+                .as_array()
+                .expect("workspaces")
+                .iter()
+                .map(|workspace| workspace["workspace"].as_str().expect("name").to_owned())
+                .collect()
+        }
+
+        let mut everything = request(&root, "timeline");
+        everything.limit = Some(20.0);
+        let all_sessions = session_ids(&payload(&root, everything));
+        assert_eq!(all_sessions.len(), 10, "the fixture indexes ten sessions");
+
+        let mut seen: Vec<String> = Vec::new();
+        for offset in [0.0, 4.0] {
+            let mut page = request(&root, "timeline");
+            page.limit = Some(4.0);
+            page.offset = Some(offset);
+            let answer = payload(&root, page);
+            assert_eq!(answer["truncated"], true);
+            let page_ids = session_ids(&answer);
+            assert_eq!(page_ids.len(), 4);
+            for id in &page_ids {
+                assert!(!seen.contains(id), "session {id} repeated across pages");
+            }
+            seen.extend(page_ids);
+        }
+        assert_eq!(seen, all_sessions[..8].to_vec());
+
+        // The last page is short, reports no truncation, and completes the list.
+        let mut tail = request(&root, "timeline");
+        tail.limit = Some(4.0);
+        tail.offset = Some(8.0);
+        let tail_answer = payload(&root, tail);
+        assert_eq!(session_ids(&tail_answer), all_sessions[8..].to_vec());
+        assert_eq!(tail_answer["truncated"], false);
+
+        // An offset past the end is an empty page, not an error.
+        let mut beyond = request(&root, "timeline");
+        beyond.limit = Some(4.0);
+        beyond.offset = Some(20.0);
+        let beyond_answer = payload(&root, beyond);
+        assert_eq!(session_ids(&beyond_answer).len(), 0);
+        assert_eq!(beyond_answer["truncated"], false);
+
+        let mut all_workspaces = request(&root, "workspaces");
+        all_workspaces.limit = Some(10.0);
+        let all_workspace_names = workspace_ids(&payload(&root, all_workspaces));
+        assert_eq!(all_workspace_names.len(), 2);
+
+        let mut first = request(&root, "workspaces");
+        first.limit = Some(1.0);
+        first.offset = Some(0.0);
+        let first_answer = payload(&root, first);
+        let second = QueryRequest {
+            limit: Some(1.0),
+            offset: Some(1.0),
+            ..request(&root, "workspaces")
+        };
+        let second_answer = payload(&root, second);
+        let mut paged = workspace_ids(&first_answer);
+        paged.extend(workspace_ids(&second_answer));
+        assert_eq!(paged, all_workspace_names);
+        assert_eq!(
+            first_answer["total"], 2,
+            "total counts every workspace: {first_answer}"
+        );
+        assert_eq!(second_answer["total"], 2);
+    }
+
+    /// A matched entry whose session row vanished is skipped, not turned into SESSIONGRAPH_CORRUPT.
+    #[test]
+    fn search_skips_entries_whose_session_vanished() {
+        let fixture = fixture();
+        let root = seed(&fixture);
+        // Remove one session row but leave its entries and their FTS rows in place: the ranking scan
+        // still sees them, while `read_hit_details`'s join with `session` cannot.
+        let connection =
+            Connection::open(root.join(INDEX_FILE)).expect("open the fixture index read-write");
+        connection
+            .execute("DELETE FROM session WHERE id = ?1", params!["aaaa-1"])
+            .expect("delete the session row");
+        drop(connection);
+
+        let mut query = request(&root, "search");
+        query.query = Some("广告".to_owned());
+        query.limit = Some(10.0);
+        let answer = payload(&root, query);
+        assert_eq!(
+            answer["total"], 2,
+            "the scan still ranks two sessions: {answer}"
+        );
+        let hits = answer["hits"].as_array().expect("hits");
+        assert_eq!(
+            hits.len(),
+            1,
+            "the orphaned session's hit is skipped, the rest answer: {answer}"
+        );
+        assert_eq!(hits[0]["sessionId"], "bbbb-2");
+        assert_eq!(answer["truncated"], true);
     }
 
     #[test]

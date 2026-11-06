@@ -2,9 +2,10 @@
  * Session-log indexer for the session-graph seam: turns `~/.dsh/sessions` into the SQLite index
  * `dsh-plugin-sessiongraph-sqlite` reads.
  *
- * Registers **only an indexer**, never a store. Indexing is caller-initiated (`sessiongraph_index`)
- * and never runs from a query: a full machine is hundreds of logs and more than a gigabyte of
- * decompressed JSON, so it has its own timeout budget and the query path stays millisecond-fast.
+ * Registers **only an indexer**, never a store. Indexing is caller-initiated (the `sessiongraph`
+ * tool's `index` operation) and never runs from a query: a full machine is hundreds of logs and more
+ * than a gigabyte of decompressed JSON, so it has its own timeout budget and the query path stays
+ * millisecond-fast.
  *
  * The index root is an opaque directory the caller names; `indexRoot` is where `index.db` lives, and
  * `sessionsRoot` (the harness's own log directory) is a separate, configurable input. That split is
@@ -181,7 +182,8 @@ export interface Config {
    * Build the very first index automatically in the background when a session starts (default
    * true). The first build reads every log on the machine and can take seconds to minutes, so it
    * runs as a host background job and never blocks session creation. Set false to require an
-   * explicit `sessiongraph_index` / `/sessiongraph index` before anything is searchable.
+   * explicit index operation — `sessiongraph` with `operation=index`, or the `/sessiongraph index`
+   * command — before anything is searchable.
    */
   autoBuild?: boolean
   /**
@@ -419,8 +421,8 @@ export function isBackgroundIndexReport(report: SessiongraphIndexReport): report
  * under the default `wakeup` delivery, opens a turn on an idle one. A maintenance refresh nobody
  * asked for must not appear in the transcript or start a reply of its own, so this runs as a plain
  * background promise: the index still keeps itself fresh, and the conversation stays quiet. The
- * explicit `sessiongraph_index` path is the one that still registers a job, because there a caller
- * is waiting for the id.
+ * explicit index operation (the `sessiongraph` tool's `index`) is the one that still registers a
+ * job, because there a caller is waiting for the id.
  * @param config - the resolved plugin configuration.
  * @param autoIndexRuns - when each root last had an automatic refresh, in epoch milliseconds.
  * @param autoIndexInFlight - roots with a background run still executing, so a slow first build cannot

@@ -15,16 +15,18 @@ import {
 } from 'dsh-plugin-sessiongraph-sqlite'
 import type { SessiongraphRequest } from 'dsh-plugin-sessiongraph-service'
 import type { NativeQueryRequest, NativeQueryResponse } from '../src/index.ts'
-import { loadNative, query as queryKernel } from '../src/index.ts'
+import { loadNative } from '../src/index.ts'
 
 /**
  * The query kernel is as optional as the index one: a checkout without a built `.node`, or a binary
- * built before the `query` export, skips these cases rather than failing. Every assertion compares the
- * native answer with the TypeScript store's own result for the same request — the native engine is an
- * accelerator, never a second source of truth.
+ * built before the `query` export, skips these cases rather than failing. CI is different — it must
+ * build the kernel, so a missing one fails there instead of quietly reducing coverage to nothing.
+ * Every assertion compares the native answer with the TypeScript store's own result for the same
+ * request — the native engine is an accelerator, never a second source of truth.
  */
 const kernel = loadNative()
 const canQuery = typeof kernel?.query === 'function'
+const skipWithoutKernel = !canQuery && process.env.CI === undefined
 
 let work: string
 let sessionsRoot: string
@@ -140,9 +142,10 @@ function nativeRequest(request: SessiongraphRequest): NativeQueryRequest {
         ...(request.after === undefined ? {} : { since: request.after }),
         ...(request.before === undefined ? {} : { until: request.before }),
         limit: request.limit,
+        offset: request.offset ?? 0,
       }
     case 'workspaces':
-      return { ...base, limit: request.limit }
+      return { ...base, limit: request.limit, offset: request.offset ?? 0 }
     case 'status':
       return base
   }
@@ -186,12 +189,19 @@ function normalize(value: unknown): unknown {
 }
 
 describe('native query kernel', () => {
-  it.skipIf(!canQuery)('is exposed by the same loader as the indexer', () => {
-    expect(typeof queryKernel).toBe('function')
-    expect(queryKernel({ index_root: indexRoot, operation: 'status' })).toBeDefined()
+  it('has a usable query kernel whenever CI is set', () => {
+    // Locally a missing `.node` is a normal state; CI must build it, so silently skipping there
+    // would report a green run that never exercised the kernel at all.
+    if (process.env.CI === undefined) return
+    expect(canQuery, 'CI must build the native kernel before running the query tests').toBe(true)
   })
 
-  it.skipIf(!canQuery)('answers search identically to the TypeScript store', async () => {
+  it.skipIf(skipWithoutKernel)('is exposed by the same loader as the indexer', async () => {
+    const answer = await loadNative()!.query?.({ index_root: indexRoot, operation: 'status' })
+    expect(answer?.ok).toBe(true)
+  })
+
+  it.skipIf(skipWithoutKernel)('answers search identically to the TypeScript store', async () => {
     await seedFixture()
     const request: SessiongraphRequest = { operation: 'search', indexRoot, query: '广告', limit: 5 }
     expect(await nativeAnswer(request)).toEqual(typescriptAnswer(request))
@@ -216,7 +226,7 @@ describe('native query kernel', () => {
     expect(await nativeAnswer(filtered)).toEqual(typescriptAnswer(filtered))
   })
 
-  it.skipIf(!canQuery)('answers session, event and trace identically to the TypeScript store', async () => {
+  it.skipIf(skipWithoutKernel)('answers session, event and trace identically to the TypeScript store', async () => {
     await seedFixture()
     const sessionRequest: SessiongraphRequest = {
       operation: 'session',
@@ -244,7 +254,7 @@ describe('native query kernel', () => {
     expect(await nativeAnswer(traceEvent)).toEqual(typescriptAnswer(traceEvent))
   })
 
-  it.skipIf(!canQuery)('answers timeline, workspaces and status identically to the TypeScript store', async () => {
+  it.skipIf(skipWithoutKernel)('answers timeline, workspaces and status identically to the TypeScript store', async () => {
     await seedFixture()
     const timelineRequest: SessiongraphRequest = { operation: 'timeline', indexRoot, limit: 3 }
     expect(await nativeAnswer(timelineRequest)).toEqual(typescriptAnswer(timelineRequest))
@@ -256,7 +266,7 @@ describe('native query kernel', () => {
     expect(await nativeAnswer(statusRequest)).toEqual(typescriptAnswer(statusRequest))
   })
 
-  it.skipIf(!canQuery)('reports an ambiguous prefix as a typed failure instead of guessing', async () => {
+  it.skipIf(skipWithoutKernel)('reports an ambiguous prefix as a typed failure instead of guessing', async () => {
     await seedFixture()
     const ambiguous = (await kernel!.query!({
       index_root: indexRoot,
@@ -280,7 +290,7 @@ describe('native query kernel', () => {
     expect(filtered.error_code).toBe('SESSIONGRAPH_INVALID_REQUEST')
   })
 
-  it.skipIf(!canQuery)('answers status for a root with no index instead of failing', async () => {
+  it.skipIf(skipWithoutKernel)('answers status for a root with no index instead of failing', async () => {
     const emptyRoot = join(work, 'empty')
     const answer = (await kernel!.query!({ index_root: emptyRoot, operation: 'status' })) as NativeQueryResponse
     expect(answer.ok).toBe(true)

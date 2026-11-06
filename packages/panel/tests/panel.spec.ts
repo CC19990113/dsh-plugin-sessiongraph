@@ -31,16 +31,37 @@ interface FakeResponse {
   end(body?: string): void
 }
 
-/** The request shape the handler reads: method, target, and an optional JSON body. */
-function request(method: string, path: string, body?: unknown): {
+/** Headers the browser client sends on a save; a test overrides one member to probe a guard. */
+const SAVE_HEADERS: Readonly<Record<string, string>> = { 'content-type': 'application/json' }
+
+/**
+ * Build one request the handler reads: method, target, headers, and an optional JSON body.
+ * @param method - HTTP method.
+ * @param path - path under the panel prefix.
+ * @param body - value to serialize, when the route reads one.
+ * @param headers - overrides for the default save headers; `undefined` removes one.
+ * @returns the structurally typed request.
+ */
+function request(
+  method: string,
+  path: string,
+  body?: unknown,
+  headers: Readonly<Record<string, string | undefined>> = {},
+): {
   url: string
   method: string
+  headers: Record<string, string>
   [Symbol.asyncIterator](): AsyncIterator<Buffer>
 } {
   const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))]
+  const sent: Record<string, string> = {}
+  for (const [name, value] of Object.entries({ ...SAVE_HEADERS, ...headers })) {
+    if (value !== undefined) sent[name] = value
+  }
   return {
     url: PANEL_ROUTE_PREFIX + path,
     method,
+    headers: sent,
     [Symbol.asyncIterator]() {
       let index = 0
       return {
@@ -76,7 +97,12 @@ interface PanelHarness {
   readonly ctx: Context
   readonly restricts: RestrictCall[]
   readonly sections: string[]
-  handler(method: string, path: string, body?: unknown): Promise<{ code: number; json: Record<string, unknown> }>
+  handler(
+    method: string,
+    path: string,
+    body?: unknown,
+    headers?: Readonly<Record<string, string | undefined>>,
+  ): Promise<{ code: number; json: Record<string, unknown> }>
 }
 
 /**
@@ -91,21 +117,30 @@ function harness(options: { root: string; known?: readonly string[]; seam?: bool
   const agents: Array<{ id: string; ctx: unknown }> = [{ id: 'agent-1', ctx: undefined }]
   const registered: Array<{ handler: (req: unknown, res: unknown) => void | Promise<void> }> = []
   /** A scope per agent: `restrict` must be called on the agent's own context, never the plugin's. */
-  const scope = (id: string) => ({
-    tools: {
+  const scope = (id: string) => {
+    const tools = {
       view: () => ({ knownNames: new Set(known), restrictableNames: new Set(known) }),
       restrict(filter: { deny?: readonly string[] }) {
         restricts.push({ agent: id, deny: [...(filter.deny ?? [])] })
         return () => undefined
       },
-    },
-    systemPrompt: {
+    }
+    const systemPrompt = {
       section(section: { name: string }) {
         sections.push(section.name)
         return () => undefined
       },
-    },
-  })
+    }
+    return {
+      tools,
+      systemPrompt,
+      // The supported service read is `ctx.get(name)`. A scope that only exposes properties would
+      // let a property-access regression look like a passing test.
+      get(name: string): unknown {
+        return name === 'tools' ? tools : name === 'systemPrompt' ? systemPrompt : undefined
+      },
+    }
+  }
   for (const agent of agents) agent.ctx = scope(agent.id)
   const webServer = {
     register(route: { handler: (req: unknown, res: unknown) => void | Promise<void> }) {
@@ -147,11 +182,11 @@ function harness(options: { root: string; known?: readonly string[]; seam?: bool
     ctx: host as unknown as Context,
     restricts,
     sections,
-    async handler(method, path, body) {
+    async handler(method, path, body, headers) {
       const route = registered[0]
       if (route === undefined) throw new Error('the plugin registered no route')
       const res = response()
-      await route.handler(request(method, path, body), res)
+      await route.handler(request(method, path, body, headers), res)
       return { code: res.statusCode, json: JSON.parse(res.body) as Record<string, unknown> }
     },
   }
@@ -267,6 +302,150 @@ describe('applyPanel', () => {
     applyVisibility(panel.ctx, config(root, 'sessiongraph'))
     applyPanel(panel.ctx, config(root, 'sessiongraph'))
     await panel.handler('POST', '/tools', { toolSet: 'kernel' })
+    const file = JSON.parse(readFileSync(join(root, PANEL_FILE_NAME), 'utf8')) as Record<string, unknown>
+    expect(file.toolSet).toBe('kernel')
+  })
+})
+
+describe('POST /tools request guards', () => {
+  /**
+   * A panel with both layers loaded, which is the state a save arrives in.
+   * @param root - temp index root.
+   * @returns the harness driving the registered route.
+   */
+  function mounted(root: string): PanelHarness {
+    const panel = harness({ root })
+    applyVisibility(panel.ctx, config(root, 'sessiongraph'))
+    applyPanel(panel.ctx, config(root, 'sessiongraph'))
+    return panel
+  }
+
+  it('rejects a save that does not declare a JSON body', async () => {
+    const root = tempRoot()
+    const panel = mounted(root)
+
+    const answer = await panel.handler('POST', '/tools', { toolSet: 'kernel' }, { 'content-type': undefined })
+    expect(answer.code).toBe(400)
+    expect(answer.json).toMatchObject({ ok: false })
+    // Rejected before anything was persisted: nothing in the index root changed.
+    expect(readdirSync(root)).toEqual([])
+  })
+
+  it('rejects a save whose Origin is not the request host', async () => {
+    const root = tempRoot()
+    const panel = mounted(root)
+
+    // The same name on a different port is a different origin, and a subdomain lookalike or the
+    // serialized `null` origin is foreign rather than unknown.
+    for (const [origin, host] of [
+      ['https://evil.example', '127.0.0.1:61652'],
+      ['http://127.0.0.1:61653', '127.0.0.1:61652'],
+      ['http://localhost.evil.example', '127.0.0.1:61652'],
+      ['null', '127.0.0.1:61652'],
+    ] as const) {
+      const answer = await panel.handler('POST', '/tools', { toolSet: 'kernel' }, { origin, host })
+      expect(answer.code).toBe(403)
+      expect(answer.json).toMatchObject({ ok: false })
+    }
+    expect(readdirSync(root)).toEqual([])
+  })
+
+  it('rejects a cross-site save even when no Origin header was sent', async () => {
+    const root = tempRoot()
+    const panel = mounted(root)
+
+    const answer = await panel.handler('POST', '/tools', { toolSet: 'kernel' }, { 'sec-fetch-site': 'cross-site' })
+    expect(answer.code).toBe(403)
+    expect(answer.json).toMatchObject({ ok: false })
+    expect(readdirSync(root)).toEqual([])
+  })
+
+  it('accepts a save whose Origin equals the request host', async () => {
+    const root = tempRoot()
+    const panel = mounted(root)
+
+    // The browser sends the page's own address as Origin while Host is what the page dialled: a
+    // same-origin save is exactly the two being equal.
+    const saved = await panel.handler('POST', '/tools', { toolSet: 'both' }, {
+      'content-type': 'application/json; charset=utf-8',
+      origin: 'http://127.0.0.1:61652',
+      host: '127.0.0.1:61652',
+      'sec-fetch-site': 'same-origin',
+    })
+    expect(saved.code).toBe(200)
+    expect(saved.json).toMatchObject({ ok: true, toolSet: 'both' })
+
+    // localhost and a non-browser client (no Sec-Fetch-Site) both work the same way.
+    const again = await panel.handler('POST', '/tools', { toolSet: 'kernel' }, {
+      origin: 'http://localhost:3000',
+      host: 'localhost:3000',
+      'sec-fetch-site': 'none',
+    })
+    expect(again.code).toBe(200)
+    expect(again.json).toMatchObject({ ok: true, toolSet: 'kernel' })
+    const file = JSON.parse(readFileSync(join(root, PANEL_FILE_NAME), 'utf8')) as Record<string, unknown>
+    expect(file.toolSet).toBe('kernel')
+  })
+
+  it('accepts a save from a LAN address the panel is served on', async () => {
+    // The regression the host comparison exists for: the panel opened at a LAN address must still
+    // save. A hardcoded loopback allowlist rejected exactly this request.
+    const root = tempRoot()
+    const panel = mounted(root)
+
+    const saved = await panel.handler('POST', '/tools', { toolSet: 'both' }, {
+      origin: 'http://192.168.1.5:61652',
+      host: '192.168.1.5:61652',
+      'sec-fetch-site': 'same-origin',
+    })
+    expect(saved.code).toBe(200)
+    expect(saved.json).toMatchObject({ ok: true, toolSet: 'both' })
+    const file = JSON.parse(readFileSync(join(root, PANEL_FILE_NAME), 'utf8')) as Record<string, unknown>
+    expect(file.toolSet).toBe('both')
+  })
+
+  it('rejects a save whose Host is a domain even when Origin matches', async () => {
+    // The DNS-rebinding shape: the page's origin never changes, so both headers read the attacker's
+    // domain — only the literal-address requirement on Host tells it apart from a real local page.
+    const root = tempRoot()
+    const panel = mounted(root)
+
+    const answer = await panel.handler('POST', '/tools', { toolSet: 'kernel' }, {
+      origin: 'http://evil.example:61652',
+      host: 'evil.example:61652',
+    })
+    expect(answer.code).toBe(403)
+    expect(answer.json).toMatchObject({ ok: false })
+    expect(readdirSync(root)).toEqual([])
+  })
+
+  it('accepts a save from an IPv6 literal host', async () => {
+    const root = tempRoot()
+    const panel = mounted(root)
+
+    const saved = await panel.handler('POST', '/tools', { toolSet: 'both' }, {
+      origin: 'http://[::1]:61652',
+      host: '[::1]:61652',
+      'sec-fetch-site': 'same-origin',
+    })
+    expect(saved.code).toBe(200)
+    expect(saved.json).toMatchObject({ ok: true, toolSet: 'both' })
+    const file = JSON.parse(readFileSync(join(root, PANEL_FILE_NAME), 'utf8')) as Record<string, unknown>
+    expect(file.toolSet).toBe('both')
+  })
+
+  it('falls back to the loopback names when the request carries no Host header', async () => {
+    const root = tempRoot()
+    const panel = mounted(root)
+
+    const saved = await panel.handler('POST', '/tools', { toolSet: 'kernel' }, { origin: 'http://[::1]:61652' })
+    expect(saved.code).toBe(200)
+    expect(saved.json).toMatchObject({ ok: true, toolSet: 'kernel' })
+
+    const refused = await panel.handler('POST', '/tools', { toolSet: 'both' }, { origin: 'https://evil.example' })
+    expect(refused.code).toBe(403)
+    expect(refused.json).toMatchObject({ ok: false })
+    // The refused save never landed: the file still holds the value the accepted one wrote.
     const file = JSON.parse(readFileSync(join(root, PANEL_FILE_NAME), 'utf8')) as Record<string, unknown>
     expect(file.toolSet).toBe('kernel')
   })

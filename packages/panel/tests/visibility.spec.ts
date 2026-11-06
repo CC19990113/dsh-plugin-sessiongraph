@@ -38,21 +38,46 @@ interface SectionCall {
 interface FakeAgent {
   readonly id: string
   readonly created: boolean
-  readonly ctx: { tools: unknown; systemPrompt: unknown }
+  readonly ctx: {
+    tools: unknown
+    systemPrompt: unknown
+    get(name: string): unknown
+  }
+}
+
+/** Host-level toggles for shapes a real composition can present. */
+interface HarnessOptions {
+  /**
+   * Omit `view` from the plugin-level registry, modelling a host whose tool registry cannot be
+   * inspected. No deny list can then be computed, so nothing may be masked — or announced.
+   */
+  readonly uninspectable?: boolean
+  /** Make `restrict` throw, modelling a registry whose name set changed under the check. */
+  readonly refuseRestrict?: boolean
+}
+
+/** Which services one fake scope's `get()` reports. */
+interface ScopeOptions {
+  /**
+   * Answer `get('tools')` with `undefined` while the `tools` property stays reachable. A
+   * property-access fallback would still call `restrict`: the shape the 80179d7 fix reads through.
+   */
+  readonly hideToolsFromGet?: boolean
 }
 
 /**
  * Build a fake host holding `known` global tool names.
  * @param known - the names `ctx.tools.view(undefined)` reports.
+ * @param options - host shapes that are not about the names.
  * @returns the context plus every registration the plugin made.
  */
-function harness(known: readonly string[]): {
+function harness(known: readonly string[], options: HarnessOptions = {}): {
   ctx: Context
   agents: FakeAgent[]
   restricts: RestrictCall[]
   sections: SectionCall[]
   lifted: number
-  addAgent(id: string): FakeAgent
+  addAgent(id: string, scopeOptions?: ScopeOptions): FakeAgent
   created: ((payload: { agent?: unknown }) => void)[]
 } {
   const restricts: RestrictCall[] = []
@@ -61,10 +86,11 @@ function harness(known: readonly string[]): {
   const created: ((payload: { agent?: unknown }) => void)[] = []
   let lifted = 0
   /** A fresh scope, each with its own recorded calls so "inside whose scope" stays checkable. */
-  const scopeFor = (id: string) => {
+  const scopeFor = (id: string, scopeOptions: ScopeOptions = {}) => {
     const tools = {
       view: () => ({ knownNames: new Set(known), restrictableNames: new Set(known) }),
       restrict(filter: { deny?: readonly string[] }) {
+        if (options.refuseRestrict === true) throw new Error('unknown tool name')
         restricts.push({ agent: id, deny: [...(filter.deny ?? [])] })
         return () => { lifted += 1 }
       },
@@ -75,11 +101,22 @@ function harness(known: readonly string[]): {
         return () => { lifted += 1 }
       },
     }
-    return { tools, systemPrompt }
+    return {
+      tools,
+      systemPrompt,
+      // `ctx.get(name)` is the supported service read; a scope exposing only properties would make
+      // a property-access regression look like a passing test.
+      get(name: string): unknown {
+        if (name === 'tools') return scopeOptions.hideToolsFromGet === true ? undefined : tools
+        if (name === 'systemPrompt') return systemPrompt
+        return undefined
+      },
+    }
   }
+  const globalTools = scopeFor('global').tools
   const host = {
     // The plugin-level registry: only `view` is read here, and only with `undefined` (global view).
-    tools: scopeFor('global').tools,
+    tools: options.uninspectable === true ? { restrict: globalTools.restrict } : globalTools,
     agents: { list: () => agents },
     on(_name: string, listener: (payload: { agent?: unknown }) => void) {
       // Every subscription, in registration order: `created[0]` is the apply hook, the next is the
@@ -98,8 +135,8 @@ function harness(known: readonly string[]): {
     restricts,
     sections,
     get lifted() { return lifted },
-    addAgent(id: string) {
-      const agent: FakeAgent = { id, created: false, ctx: scopeFor(id) }
+    addAgent(id: string, scopeOptions?: ScopeOptions) {
+      const agent: FakeAgent = { id, created: false, ctx: scopeFor(id, scopeOptions) }
       agents.push(agent)
       return agent
     },
@@ -177,6 +214,37 @@ describe('applyVisibility', () => {
     const host = { tools: { register: () => undefined }, effect: (run: () => unknown) => run() }
     const ctx = host as unknown as Context
     expect(() => applyVisibility(ctx, config('sessiongraph'))).not.toThrow()
+  })
+
+  it('does not shadow the prompt when the tool registry cannot be inspected', () => {
+    // `view` is absent, so no deny list can be computed and no mask is applied. A shadow claiming the
+    // kernel tools are hidden would make the model stop calling tools it can still reach.
+    const host = harness([...KERNEL_SESSION_TOOLS, 'sessiongraph'], { uninspectable: true })
+    host.addAgent('agent-1')
+    applyVisibility(host.ctx, config('sessiongraph'))
+    expect(host.restricts).toEqual([])
+    expect(host.sections).toEqual([])
+  })
+
+  it('does not shadow the prompt when the tool mask was refused', () => {
+    // The name set changed between the check and the call, so `restrict` threw and no mask went on.
+    // The prompt shadow is paired with the mask, so it must not be registered alone.
+    const host = harness([...KERNEL_SESSION_TOOLS, 'sessiongraph'], { refuseRestrict: true })
+    host.addAgent('agent-1')
+    applyVisibility(host.ctx, config('sessiongraph'))
+    expect(host.restricts).toEqual([])
+    expect(host.sections).toEqual([])
+  })
+
+  it('does not restrict through a scope whose service lookup has no tool registry', () => {
+    // The `tools` property is still reachable, so a fallback to property access would call `restrict`
+    // anyway: reading the service through `get()` is the 80179d7 fix, and this is its guard.
+    const host = harness([...KERNEL_SESSION_TOOLS, 'sessiongraph'])
+    host.addAgent('agent-1', { hideToolsFromGet: true })
+    applyVisibility(host.ctx, config('sessiongraph'))
+    expect(host.restricts).toEqual([])
+    // No mask means no prompt shadow either.
+    expect(host.sections).toEqual([])
   })
 
   it('lifts the previous masks and applies the new mode when the setting changes', () => {

@@ -37,7 +37,7 @@
     - id: sessiongraph-sessions
       name: 'dsh-plugin-sessiongraph-sessions'
 
-    # Consumer: the model-facing `sessiongraph` and `sessiongraph_index` tools plus
-    # their system-prompt section.
+    # Consumer: the model-facing `sessiongraph` tool (its `index` operation builds
+    # the index) plus its system-prompt section.
     - id: sessiongraph-tool
       name: 'dsh-plugin-sessiongraph-tool'

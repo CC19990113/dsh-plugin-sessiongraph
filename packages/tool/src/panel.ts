@@ -13,6 +13,11 @@
  * The route table is deliberately tiny: a GET that reports the current choice plus which tools this
  * host actually registered, and a POST that validates one enum value, persists it, and re-applies it
  * to the live agents. Nothing here accepts a path, so there is no path-traversal surface at all.
+ *
+ * The port is loopback, which every page in the user's browser can reach, so "a request arrived" is
+ * not evidence the user asked for it. The save therefore proves its provenance before it is allowed
+ * to change anything: a JSON content type, an `Origin` that names this request's own literal host,
+ * and no cross-site `Sec-Fetch-Site`.
  * @module dsh-plugin-sessiongraph-tool/panel
  */
 
@@ -40,6 +45,26 @@ export const PANEL_FILE_NAME = 'panel.json'
 const MAX_BODY_BYTES = 8 * 1024
 
 /**
+ * Loopback names trusted when a request carries no `Host` header to compare against.
+ *
+ * The primary same-origin test is `Origin`'s host against the request's own `Host`, which accepts any
+ * address the panel is actually served from. Only an HTTP/1.0 probe has no `Host`, and then this
+ * short list is the conservative reading of "this machine".
+ */
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1'])
+
+/** `Sec-Fetch-Site` values that mean "no foreign site started this request". */
+const SAME_ORIGIN_FETCH_SITES = new Set(['same-origin', 'none'])
+
+/** Why a save was refused: the status to send and the line the panel shows. */
+interface WriteRejection {
+  /** HTTP status: 400 for a malformed request, 403 for a foreign one. */
+  readonly code: number
+  /** One line the panel can display verbatim. */
+  readonly message: string
+}
+
+/**
  * The request face of a route handler, declared structurally.
  *
  * `@deepseek-ai/dsh-host-webserver` is not a dependency of this package: the service may be absent,
@@ -51,6 +76,12 @@ export interface PanelRequest {
   readonly url?: string
   /** HTTP method; node always supplies it. */
   readonly method?: string
+  /**
+   * Request headers, as node supplies them (names already lowercased). Only the save route reads
+   * them: a loopback port accepts a write from any page that can reach it, so the save inspects the
+   * headers that identify the requesting page.
+   */
+  readonly headers?: Readonly<Record<string, string | readonly string[] | undefined>>
   /** Body chunks, used only by the save route. */
   [Symbol.asyncIterator](): AsyncIterator<Buffer | string>
 }
@@ -223,6 +254,11 @@ async function handleRequest(ctx: Context, file: string, req: PanelRequest, res:
       return
     }
     if (route === '/tools' && method === 'POST') {
+      const rejection = writeRejection(req)
+      if (rejection !== undefined) {
+        respond(res, { code: rejection.code, body: { ok: false, message: rejection.message } })
+        return
+      }
       respond(res, await saveResult(ctx, file, req))
       return
     }
@@ -364,6 +400,131 @@ async function writePanelFile(ctx: Context, file: string, document: PanelFile): 
     console.warn('[sessiongraph] writing panel.json failed:', error)
     return false
   }
+}
+
+/**
+ * Check that a save came from this panel's own page.
+ *
+ * Three checks, in increasing cost: the body must declare JSON (a cross-site HTML form cannot send
+ * that media type without a preflight, which this route never answers, so the POST fails), an
+ * `Origin` that is present must name this request's own host, and `Sec-Fetch-Site` that is present
+ * must say same-origin or none. Absent `Origin` / `Sec-Fetch-Site` are allowed: a non-browser client
+ * (the tests, curl, a script) sends neither, and the JSON media type is already something a foreign
+ * page cannot produce without a preflight.
+ * @param req - the request to judge.
+ * @returns the refusal, or `undefined` when the save may proceed.
+ */
+function writeRejection(req: PanelRequest): WriteRejection | undefined {
+  if (!declaresJsonBody(req.headers)) {
+    return { code: 400, message: '保存请求必须带 content-type: application/json' }
+  }
+  const origin = headerValue(req.headers, 'origin')
+  if (origin !== undefined && !isSameOrigin(origin, headerValue(req.headers, 'host'))) {
+    return { code: 403, message: '跨源页面不能修改面板设置' }
+  }
+  const site = headerValue(req.headers, 'sec-fetch-site')
+  if (site !== undefined && !SAME_ORIGIN_FETCH_SITES.has(site.trim().toLowerCase())) {
+    return { code: 403, message: '跨源页面不能修改面板设置' }
+  }
+  return undefined
+}
+
+/**
+ * Read one request header, tolerating either case in the header bag.
+ * @param headers - the request's headers, when the host supplied them.
+ * @param name - lowercase header name to find.
+ * @returns the first value sent for that name, or `undefined` when it was absent.
+ */
+function headerValue(headers: PanelRequest['headers'], name: string): string | undefined {
+  if (headers === undefined) return undefined
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== name) continue
+    return typeof value === 'string' ? value : value?.[0]
+  }
+  return undefined
+}
+
+/**
+ * Whether the request declares a JSON body. Only the media type matters; parameters such as
+ * `charset=utf-8` are expected and ignored.
+ * @param headers - the request's headers.
+ * @returns whether `content-type` names `application/json`.
+ */
+function declaresJsonBody(headers: PanelRequest['headers']): boolean {
+  const value = headerValue(headers, 'content-type')
+  if (value === undefined) return false
+  return (value.split(';')[0] ?? '').trim().toLowerCase() === 'application/json'
+}
+
+/**
+ * Whether an `Origin` names the host this request was addressed to.
+ *
+ * A page opened at 127.0.0.1:PORT, localhost:PORT or a LAN address sends its own address as
+ * `Origin`, while the request's `Host` is the very address it dialled: the two are strings for the
+ * same host and port, so equality is the standard same-origin test and needs no list of names the
+ * host might bind. A page from another origin sends its own address while `Host` stays this host,
+ * so the two differ. Comparing the port too is what separates two panels on one machine.
+ *
+ * Equality alone is not enough: a page whose *domain* resolves to this machine (the DNS-rebinding
+ * attack) also sends matching `Origin` and `Host`, because both carry that domain. The host half is
+ * therefore required to be a literal address or `localhost` — see {@link isLiteralHostname}.
+ * @param origin - the `Origin` header value.
+ * @param host - the `Host` header value, when the request carried one.
+ * @returns whether the origin is this request's own host.
+ */
+function isSameOrigin(origin: string, host: string | undefined): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(origin)
+  } catch {
+    // `null` — the serialized origin of a sandboxed frame or a file URL — is foreign, not unknown.
+    return false
+  }
+  if (host !== undefined) {
+    const named = host.trim().toLowerCase()
+    return parsed.host.toLowerCase() === named && isLiteralHostname(named)
+  }
+  // No `Host` (an HTTP/1.0 probe): fall back to the loopback names, the conservative reading of
+  // "this machine". WHATWG keeps IPv6 brackets in `hostname`, so strip them before comparing.
+  return LOOPBACK_HOSTNAMES.has(parsed.hostname.replace(/^\[|\]$/gu, '').toLowerCase())
+}
+
+/**
+ * The hostname half of a `Host` header value, port removed.
+ *
+ * A bracketed IPv6 literal is taken through its closing bracket, so its colons are not read as a
+ * port separator; anything else ends at the first colon.
+ * @param host - the `Host` header value.
+ * @returns its hostname, brackets kept for IPv6.
+ */
+function hostnameOf(host: string): string {
+  if (host.startsWith('[')) {
+    const end = host.indexOf(']')
+    return end === -1 ? host : host.slice(0, end + 1)
+  }
+  const colon = host.indexOf(':')
+  return colon === -1 ? host : host.slice(0, colon)
+}
+
+/**
+ * Whether a `Host` header names an address rather than a domain.
+ *
+ * This is the DNS-rebinding guard. `Origin` equals `Host` for a page served from this machine, but
+ * also for a page whose domain was pointed at this machine after the browser loaded it: the page's
+ * origin never changes, and `Host` carries whatever name the browser dialled, so both read
+ * `attacker.example` while the request actually reaches the panel. A browser cannot forge `Host`, so
+ * requiring a literal address (or `localhost`) keeps loopback, LAN and IPv6 usable while a domain
+ * name — the only thing an attacker can make resolve here — is refused.
+ * @param host - the `Host` header value, port included.
+ * @returns whether its hostname is an IPv4 or IPv6 literal, or `localhost`.
+ */
+function isLiteralHostname(host: string): boolean {
+  const hostname = hostnameOf(host)
+  if (hostname.startsWith('[')) return hostname.endsWith(']') && hostname.length > 2
+  if (hostname === 'localhost') return true
+  const parts = hostname.split('.')
+  if (parts.length !== 4) return false
+  return parts.every(part => /^\d{1,3}$/u.test(part) && Number(part) <= 255)
 }
 
 /**

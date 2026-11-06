@@ -61,7 +61,9 @@ case "$host_arch" in
   *) rust_arch="$host_arch" ;;
 esac
 
-if [ -z "${RUSTUP_TOOLCHAIN:-}" ] && command -v rustup >/dev/null 2>&1; then
+# `$platform` guards the whole block: this picks a *darwin* toolchain, and on Linux it would otherwise
+# build a name like `stable--apple-darwin` out of the empty `$host_arch` and warn about it.
+if [ "$platform" = darwin ] && [ -z "${RUSTUP_TOOLCHAIN:-}" ] && command -v rustup >/dev/null 2>&1; then
   native_toolchain="stable-$rust_arch-apple-darwin"
   if rustup toolchain list 2>/dev/null | sed 's/ .*//' | grep -qx "$native_toolchain"; then
     export RUSTUP_TOOLCHAIN="$native_toolchain"
@@ -88,10 +90,21 @@ fi
 
 # A cdylib built for the wrong architecture is the one failure that looks like success: cargo says
 # "Finished", the file exists, and Node then refuses to load it.
-if [ -n "$host_arch" ] && command -v file >/dev/null 2>&1 && ! file "$source_file" | grep -qw "$host_arch"; then
-  echo "build-native: $source_file is not built for $host_arch:" >&2
-  file "$source_file" >&2
-  exit 1
+#
+# `uname -m` and `file(1)` spell the same architecture differently: uname says `x86_64`, while the ELF
+# magic names EM_X86_64 `x86-64` (upstream `Magdir/elf`). Compare against the file(1) spelling, or a
+# plain Linux host build is rejected as a mismatch. `$host_arch` itself is left alone — it spells the
+# toolchain name above, and it also warns the reader which architecture was expected.
+if [ -n "$host_arch" ]; then
+  case "$host_arch" in
+    x86_64) file_arch=x86-64 ;;
+    *) file_arch=$host_arch ;;
+  esac
+  if command -v file >/dev/null 2>&1 && ! file "$source_file" | grep -qw "$file_arch"; then
+    echo "build-native: $source_file is not built for $host_arch:" >&2
+    file "$source_file" >&2
+    exit 1
+  fi
 fi
 
 destination="$here/sessiongraph-core.$platform-$arch.node"

@@ -599,12 +599,14 @@ export function buildRequest(
         ...(args.after === undefined ? {} : { after: timestamp('after', args.after) }),
         ...(args.before === undefined ? {} : { before: timestamp('before', args.before) }),
         limit: bounded(args.limit, SESSIONGRAPH_DEFAULT_LIMITS.timeline, maxLimit),
+        ...(offset === undefined ? {} : { offset }),
       }
     case 'workspaces':
       return {
         operation: 'workspaces',
         indexRoot,
         limit: bounded(args.limit, SESSIONGRAPH_DEFAULT_LIMITS.workspaces, maxLimit),
+        ...(offset === undefined ? {} : { offset }),
       }
     case 'status':
       return { operation: 'status', indexRoot }
@@ -768,7 +770,7 @@ async function runOperation(
     if (!isCorruptIndexError(error)) throw explainQueryFailure(error, indexRoot)
     try {
       console.error(`sessiongraph: index at "${indexRoot}" is unreadable (${describeError(error)}); rebuilding it`)
-      await ctx.sessiongraph.index(indexRoot, { force: true })
+      await ctx.sessiongraph.index(indexRoot, { force: true }, exec.signal)
       return projectResult(await ctx.sessiongraph.query(request, exec.signal), refresh.stale)
     } catch (rebuildError) {
       console.error(`sessiongraph: rebuilding the index failed: ${describeError(rebuildError)}`)

@@ -52,7 +52,9 @@ function queryKernel(): NativeQueryKernel | undefined {
       return usable
     }
   } catch {
-    // A loader failure is indistinguishable from "not built" for this store's purposes.
+    // `loadNative` promises never to throw, so reaching this means the loader itself is broken. That
+    // is a real engine fault — unlike "not built" — and is worth one diagnostic line.
+    reportOnce('the native query module failed to load; falling back to the TypeScript store')
   }
   return undefined
 }
@@ -85,8 +87,45 @@ export async function queryNatively(
   try {
     return decodeResponse(await kernel.query(nativeRequest(request, indexRoot, maxSnippetChars)), request.operation)
   } catch (error) {
+    // A request the kernel rejected (an unknown session, an ambiguous prefix, a malformed filter) is
+    // the caller's business, not an engine fault: the TypeScript store answers it and raises the same
+    // typed error, so logging "native query failed" here would blame the wrong layer. Only a broken
+    // kernel — an unexpected throw, a malformed envelope, an answer for another operation — is
+    // reported, and `reportOnce` keeps a systematically broken build from crying wolf per query.
+    if (isBusinessError(error)) return undefined
     reportOnce(`native query failed, falling back to the TypeScript store: ${describeError(error)}`)
     return undefined
+  }
+}
+
+/**
+ * Whether a native failure is the seam's own typed refusal rather than an engine fault.
+ *
+ * The kernel reports every failure as `ok: false` with a `SESSIONGRAPH_*` code; only the two codes a
+ * caller can cause by asking for something that does not exist or does not make sense fall through
+ * silently. `SESSIONGRAPH_CORRUPT`, `SESSIONGRAPH_IO`, and anything not from the kernel stay loud.
+ * @param error - whatever the kernel or decoder raised.
+ * @returns true when the TypeScript store should answer without logging.
+ */
+function isBusinessError(error: unknown): boolean {
+  return (
+    error instanceof NativeQueryError
+    && (error.code === 'SESSIONGRAPH_NOT_FOUND' || error.code === 'SESSIONGRAPH_INVALID_REQUEST')
+  )
+}
+
+/** A native answer the store refuses to trust, carrying the kernel's own `SESSIONGRAPH_*` code. */
+class NativeQueryError extends Error {
+  readonly code: string | undefined
+
+  /**
+   * @param message - the kernel's failure message.
+   * @param code - the kernel's `SESSIONGRAPH_*` code, when it sent one.
+   */
+  constructor(message: string, code: string | undefined) {
+    super(message)
+    this.name = 'NativeQueryError'
+    this.code = code
   }
 }
 
@@ -150,9 +189,10 @@ function nativeRequest(
         ...(request.after === undefined ? {} : { since: request.after }),
         ...(request.before === undefined ? {} : { until: request.before }),
         limit: request.limit,
+        offset: request.offset ?? 0,
       }
     case 'workspaces':
-      return { ...base, limit: request.limit }
+      return { ...base, limit: request.limit, offset: request.offset ?? 0 }
     case 'status':
       // `status` is answered from the file itself, before any engine is consulted.
       return base
@@ -174,7 +214,10 @@ function decodeResponse(raw: unknown, operation: string): SessiongraphResult {
   const response = raw as Record<string, unknown>
   if (response['ok'] !== true) {
     const message = response['error_message'] ?? response['errorMessage'] ?? 'native query failed'
-    throw new Error(String(message))
+    const code = response['error_code'] ?? response['errorCode']
+    // The code rides along so the caller can tell a typed refusal (not found, bad request) from a
+    // kernel fault without parsing the message.
+    throw new NativeQueryError(String(message), typeof code === 'string' ? code : undefined)
   }
   const payload = response['payload_json'] ?? response['payloadJson']
   if (typeof payload !== 'string') throw new Error('native query response carries no payload')

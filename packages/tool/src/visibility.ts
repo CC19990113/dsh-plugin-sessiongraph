@@ -474,6 +474,11 @@ function subscribe(state: VisibilityState): void {
 
 /**
  * Apply the current mode to one agent, replacing anything applied earlier.
+ *
+ * The prompt shadow is registered only after the tool mask actually went on. A shadow says "the
+ * tools this section describes are hidden", so pairing it with a mask that never applied — an
+ * incomplete registry, a scope without the tool service, a refused `restrict` — would tell the model
+ * to stop calling tools it can still reach. Nothing to hide means no mask and no shadow at all.
  * @param state - this plugin instance's state.
  * @param agent - the agent to constrain.
  */
@@ -481,14 +486,14 @@ function applyToAgent(state: VisibilityState, agent: AgentLike): void {
   const scope = agent.ctx
   if (scope === undefined) return
   const deny = currentDenyList(state)
-  if (deny.length > 0) {
-    const dispose = restrictWithin(scope, deny)
-    if (dispose !== undefined) record(state, agent, dispose)
-  }
+  if (deny.length === 0) return
+  const dispose = restrictWithin(scope, deny)
+  if (dispose === undefined) return
+  record(state, agent, dispose)
   const section = replacementSection(state.mode)
   if (section === undefined) return
-  const dispose = shadowWithin(scope, section)
-  if (dispose !== undefined) record(state, agent, dispose)
+  const shadow = shadowWithin(scope, section)
+  if (shadow !== undefined) record(state, agent, shadow)
 }
 
 /**

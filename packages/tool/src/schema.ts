@@ -378,7 +378,9 @@ export const SESSIONGRAPH_PARAMETERS = {
   },
   offset: {
     type: 'number',
-    description: '跳过前多少条，用于翻页。',
+    description:
+      '跳过前多少条，用于翻页。search、session、timeline、workspaces 四个操作都支持：search 跳过命中、'
+      + 'session 跳过条目、timeline 跳过会话、workspaces 跳过工作区。',
   },
   force: {
     type: 'boolean',

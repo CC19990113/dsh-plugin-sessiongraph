@@ -33,3 +33,63 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+  # Two things happen here that the job above cannot do:
+  #   1. the Rust unit tests in `crates/sessiongraph-core` (parse/decode/tokenize/query) run — that
+  #      job has no Rust toolchain, and `pnpm test` only ever reaches the kernel through a compiled
+  #      addon;
+  #   2. the kernel is built *from this commit* and then exercised from JS. In the job above the
+  #      loader finds the published platform addon in `node_modules` (the last release's kernel), so
+  #      `packages/native/tests` there compare the Rust engine against an older binary; here they
+  #      compare this commit's Rust engine against the TypeScript store, field by field.
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The crate is not at the repo root, so the cache has to be pointed at its own target dir;
+      # the default would look for a root `Cargo.toml` and find nothing to key on.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/sessiongraph-core -> target
+
+      # `rusqlite` is built with its `bundled` feature, which compiles the SQLite amalgamation
+      # into the module — no system libsqlite, no `apt-get` step. FTS5 is verified at run time by
+      # `write::verify_fts5`, so nothing here depends on the runner's SQLite build options, and the
+      # only other native requirement is a C compiler, which `ubuntu-latest` already carries.
+      #
+      # 32 of the 33 cases run: the one that reads the developer's own `~/.dsh/sessiongraph` index
+      # is `#[ignore]`d, so it is not a CI gap.
+      - name: Test the Rust kernel
+        run: cargo test --manifest-path crates/sessiongraph-core/Cargo.toml
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # `build:native` is `packages/native/build-native.sh`: cargo builds the cdylib, then copies it
+      # to `packages/native/sessiongraph-core.linux-x64.node`. `loadNative()` probes that path
+      # first, ahead of the published addon, so the tests below load this build and not a release.
+      #
+      # TARGET_TRIPLE is set for the same reason `publish.yml`'s release matrix sets it. The script
+      # ends with an architecture guard that compares the artifact against `uname -m` (`x86_64`),
+      # while `file` names ELF EM_X86_64 `x86-64` (upstream `Magdir/elf`), so a plain host build
+      # fails that guard on linux-x64. The cross-build path skips the host-only check — and here the
+      # "cross" target *is* the host triple, so the result is the binary a release would ship.
+      - name: Build the kernel from this checkout
+        run: pnpm --filter dsh-plugin-sessiongraph-native run build:native
+        env:
+          TARGET_TRIPLE: x86_64-unknown-linux-gnu
+
+      # `process.env.CI` turns the kernel-less skip in `tests/query.spec.ts` into a failure, so a
+      # build that quietly produced no loadable kernel fails here instead of shrinking this job to
+      # a green no-op.
+      - name: Compare the native kernel against the TypeScript store
+        run: pnpm vitest run packages/native/tests

@@ -836,11 +836,11 @@ export function timeline(db: DatabaseSync, request: SessiongraphTimelineRequest)
   }
   const where = filters.length === 0 ? '' : `WHERE ${filters.join(' AND ')}`
   // One extra row distinguishes "exactly `limit` sessions" from "there are more" without a second
-  // count query.
+  // count query; `offset` skips whole sessions, so a second page neither repeats nor drops one.
   const found = rows(
     db,
-    `SELECT ${SESSION_COLUMNS} FROM session s ${where} ORDER BY s.last_at DESC, s.id ASC LIMIT ?`,
-    [...params, limit + 1],
+    `SELECT ${SESSION_COLUMNS} FROM session s ${where} ORDER BY s.last_at DESC, s.id ASC LIMIT ? OFFSET ?`,
+    [...params, limit + 1, bound(request.offset)],
   )
   const truncated = found.length > limit
   return {
@@ -873,8 +873,8 @@ export function workspaces(
        FROM session
       GROUP BY workspace
       ORDER BY max(last_at) DESC, workspace ASC
-      LIMIT ?`,
-    [limit],
+      LIMIT ? OFFSET ?`,
+    [limit, bound(request.offset)],
   ).map(toWorkspaceStat)
   return { operation: 'workspaces', workspaces: found, total }
 }

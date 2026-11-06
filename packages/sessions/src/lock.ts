@@ -3,8 +3,8 @@
  *
  * Why this exists: the same `index.db` is written by two engines (the TypeScript one through
  * `node:sqlite`, the Rust one through bundled rusqlite) and reached by three triggers (the
- * `agent/created` background run, the lazy refresh before a query, and an explicit
- * `sessiongraph_index`). Nothing in SQLite serializes two writers that open the file
+ * `agent/created` background run, the lazy refresh before a query, and an explicit index operation
+ * — the `sessiongraph` tool's `index`). Nothing in SQLite serializes two writers that open the file
  * independently, and the failure mode is not a clean lock conflict — it is a corpus that later
  * reports `database disk image is malformed` and has to be rebuilt from scratch. A lock file turns
  * that into a short wait.
