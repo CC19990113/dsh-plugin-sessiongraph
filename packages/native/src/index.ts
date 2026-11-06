@@ -1,5 +1,5 @@
 /**
- * Loader for the native Rust index kernel.
+ * Loader for the native Rust kernel: the index writer and the query engine.
  *
  * The kernel is a napi-rs `cdylib` (`sessiongraph-core.<platform>-<arch>.node`) built from
  * `crates/sessiongraph-core` and copied beside this module by `build-native.sh`. Nothing here may
@@ -79,6 +79,66 @@ export interface NativeIndexReport {
   elapsedMs: number
 }
 
+/**
+ * One request to the native query kernel.
+ *
+ * Field names are snake_case because the Rust `QueryRequest` declares them so; the numeric fields are
+ * `number` (never BigInt) because napi maps `f64` to a JS number. The seam's request shape uses
+ * camelCase and different names (`after`/`before`), so the store's adapter translates.
+ */
+export interface NativeQueryRequest {
+  /** Directory holding the index (`<indexRoot>/index.db`). */
+  index_root: string
+  /** `search | session | event | trace | timeline | workspaces | status`. */
+  operation: string
+  /** Search text. */
+  query?: string
+  /** Full session id, or a prefix identifying exactly one session. */
+  session_id?: string
+  /** Event sequence number (event; trace's event shape). */
+  seq?: number
+  /** Page size. */
+  limit?: number
+  /** Rows to skip. */
+  offset?: number
+  /** Raw events before the target (event). */
+  window_before?: number
+  /** Raw events after the target (event). */
+  window_after?: number
+  /** Maximum descendant depth (trace's session shape). */
+  depth?: number
+  /** Workspace filter (exact, or a prefix when it ends with `/`). */
+  workspace?: string
+  /** Lower epoch-millisecond bound. */
+  since?: number
+  /** Upper epoch-millisecond bound. */
+  until?: number
+  /** Entry kinds to include (search). */
+  kinds?: string[]
+  /** One hit per session (default true). */
+  dedupe_by_session?: boolean
+  /** Largest snippet, in UTF-16 code units (the store's `maxSnippetChars`, default 240). */
+  max_snippet_chars?: number
+}
+
+/**
+ * One answer from the native query kernel.
+ *
+ * The result crosses as a JSON string in `payloadJson`: a raw event can be tens of kilobytes, and one
+ * `JSON.parse` costs less than converting every field across the napi boundary. A failure is reported
+ * as `ok: false` with the seam's error code rather than thrown, so the caller can fall back.
+ */
+export interface NativeQueryResponse {
+  /** Whether the operation ran. */
+  ok: boolean
+  /** Complete result JSON, or an empty string on failure. */
+  payload_json: string
+  /** `SESSIONGRAPH_*` code when `ok` is false. */
+  error_code?: string
+  /** Human-readable failure reason when `ok` is false. */
+  error_message?: string
+}
+
 /** The loaded native module's surface. */
 export interface NativeKernel {
   /**
@@ -92,6 +152,16 @@ export interface NativeKernel {
    * @throws when the index cannot be written; parse failures are reported, not thrown.
    */
   indexSessions(options: NativeIndexOptions): Promise<NativeIndexReport>
+  /**
+   * Answer one query, off the JavaScript thread.
+   *
+   * Optional on the interface because a kernel built before the query export exists still loads:
+   * `typeof kernel.query === 'function'` is the store's probe, and a build without it falls back to
+   * the TypeScript store exactly as a missing binary does.
+   * @param request - the snake_case request the Rust side declares.
+   * @returns the response envelope, `ok: false` carrying any failure.
+   */
+  query?(request: NativeQueryRequest): Promise<NativeQueryResponse>
 }
 
 /** `undefined` until the first {@link loadNative} call, then the kernel or `null` when absent. */
@@ -126,6 +196,20 @@ export function loadNative(): NativeKernel | undefined {
     // `createRequire` cannot fail in practice; keep the no-throw contract regardless.
   }
   return undefined
+}
+
+/**
+ * Ask the native kernel one question, when this machine has one that can answer.
+ *
+ * `query` is optional on the kernel surface, so this returns `undefined` for a build that predates the
+ * export — the same signal `loadNative()` returning `undefined` gives for a machine with no build.
+ * @param request - the snake_case request the Rust side declares.
+ * @returns the response envelope, or `undefined` when no usable kernel is present.
+ */
+export function query(request: NativeQueryRequest): Promise<NativeQueryResponse> | undefined {
+  const kernel = loadNative()
+  if (kernel?.query === undefined) return undefined
+  return kernel.query(request)
 }
 
 /**

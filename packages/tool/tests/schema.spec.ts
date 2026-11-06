@@ -10,10 +10,25 @@ import { describe, expect, it } from 'vitest'
 import { buildRequest } from '../src/index.ts'
 import {
   SESSIONGRAPH_DEFAULT_LIMITS,
-  SESSIONGRAPH_INDEX_PARAMETERS,
   SESSIONGRAPH_PARAMETERS,
+  SESSIONGRAPH_TOOL_OPERATIONS,
 } from '../src/schema.ts'
 import type { SessiongraphToolArgs } from '../src/schema.ts'
+
+describe('SESSIONGRAPH_TOOL_OPERATIONS', () => {
+  it('is the seam vocabulary plus the index write', () => {
+    expect(SESSIONGRAPH_TOOL_OPERATIONS).toEqual([
+      'search',
+      'session',
+      'event',
+      'trace',
+      'timeline',
+      'workspaces',
+      'status',
+      'index',
+    ])
+  })
+})
 
 describe('SESSIONGRAPH_PARAMETERS', () => {
   it('accepts a well-formed search', () => {
@@ -22,9 +37,28 @@ describe('SESSIONGRAPH_PARAMETERS', () => {
 
   it('accepts every declared operation, with the fields that operation takes', () => {
     expect(validateArgs(SESSIONGRAPH_PARAMETERS, { operation: 'session', session_id: 'abc' })).toEqual([])
+    expect(validateArgs(SESSIONGRAPH_PARAMETERS, { operation: 'event', session_id: 'abc', seq: 3 })).toEqual([])
+    expect(validateArgs(SESSIONGRAPH_PARAMETERS, { operation: 'trace', session_id: 'abc', seq: 3, depth: 2 })).toEqual([])
     expect(validateArgs(SESSIONGRAPH_PARAMETERS, { operation: 'timeline', limit: 5 })).toEqual([])
     expect(validateArgs(SESSIONGRAPH_PARAMETERS, { operation: 'workspaces' })).toEqual([])
     expect(validateArgs(SESSIONGRAPH_PARAMETERS, { operation: 'status' })).toEqual([])
+    expect(validateArgs(SESSIONGRAPH_PARAMETERS, { operation: 'index', force: true })).toEqual([])
+  })
+
+  it('accepts the event window and the single-session search filter', () => {
+    expect(validateArgs(SESSIONGRAPH_PARAMETERS, {
+      operation: 'event',
+      session_id: 'abc',
+      seq: 3,
+      window_before: 2,
+      window_after: 1,
+    })).toEqual([])
+    expect(validateArgs(SESSIONGRAPH_PARAMETERS, {
+      operation: 'search',
+      query: '广告',
+      session_id: 'abc',
+      dedupe_by_session: false,
+    })).toEqual([])
   })
 
   it('rejects an operation outside the enum', () => {
@@ -51,20 +85,11 @@ describe('SESSIONGRAPH_PARAMETERS', () => {
     expect(validateArgs(SESSIONGRAPH_PARAMETERS, { operation: 'search', query: 'x', limit: 'lots' }).length)
       .toBeGreaterThan(0)
   })
-})
 
-describe('SESSIONGRAPH_INDEX_PARAMETERS', () => {
-  it('accepts an empty call and every declared switch', () => {
-    expect(validateArgs(SESSIONGRAPH_INDEX_PARAMETERS, {})).toEqual([])
-    expect(validateArgs(SESSIONGRAPH_INDEX_PARAMETERS, {
-      force: true,
-      workspace: '/w',
-      session_id: 'abc',
-    })).toEqual([])
-  })
-
-  it('rejects a non-boolean force', () => {
-    expect(validateArgs(SESSIONGRAPH_INDEX_PARAMETERS, { force: 'yes' }).length).toBeGreaterThan(0)
+  it('rejects a non-numeric seq and a non-boolean force', () => {
+    expect(validateArgs(SESSIONGRAPH_PARAMETERS, { operation: 'event', session_id: 'a', seq: 'third' }).length)
+      .toBeGreaterThan(0)
+    expect(validateArgs(SESSIONGRAPH_PARAMETERS, { operation: 'index', force: 'yes' }).length).toBeGreaterThan(0)
   })
 })
 
@@ -87,6 +112,8 @@ describe('buildRequest', () => {
       after: 1_000,
       before: 2_000,
       kinds: ['user', 'tool'],
+      // Absent a session filter, one hit per session is the useful default across conversations.
+      dedupeBySession: true,
       limit: 5,
       offset: 3,
     })
@@ -94,11 +121,68 @@ describe('buildRequest', () => {
 
   it('omits filters the model did not name, rather than sending undefined fields', () => {
     const request = buildRequest({ operation: 'search', query: '广告' }, '/root', 100)
-    expect(request).toEqual({ operation: 'search', indexRoot: '/root', query: '广告', limit: 10 })
+    expect(request).toEqual({ operation: 'search', indexRoot: '/root', query: '广告', dedupeBySession: true, limit: 10 })
     expect('workspace' in request).toBe(false)
     expect('after' in request).toBe(false)
     expect('kinds' in request).toBe(false)
     expect('offset' in request).toBe(false)
+    expect('sessionId' in request).toBe(false)
+  })
+
+  it('scopes a search to one session and turns dedupe off, since one session would yield one hit', () => {
+    expect(buildRequest({ operation: 'search', query: '广告', session_id: 'abc' }, '/root', 100)).toEqual({
+      operation: 'search',
+      indexRoot: '/root',
+      query: '广告',
+      sessionId: 'abc',
+      dedupeBySession: false,
+      limit: 10,
+    })
+  })
+
+  it('honors an explicit dedupe choice over the session-filter default', () => {
+    expect(buildRequest({ operation: 'search', query: 'x', dedupe_by_session: false }, '/root', 100))
+      .toHaveProperty('dedupeBySession', false)
+    expect(buildRequest({ operation: 'search', query: 'x', session_id: 'abc', dedupe_by_session: true }, '/root', 100))
+      .toHaveProperty('dedupeBySession', true)
+  })
+
+  it('maps event and trace onto their seam requests', () => {
+    expect(buildRequest({
+      operation: 'event',
+      session_id: 'abc',
+      seq: 7.9,
+      window_before: 3,
+      window_after: 1,
+    }, '/root', 100)).toEqual({
+      operation: 'event',
+      indexRoot: '/root',
+      sessionId: 'abc',
+      seq: 7,
+      windowBefore: 3,
+      windowAfter: 1,
+    })
+    expect(buildRequest({
+      operation: 'trace',
+      session_id: 'abc',
+      seq: 7,
+      depth: 2,
+    }, '/root', 100)).toEqual({
+      operation: 'trace',
+      indexRoot: '/root',
+      sessionId: 'abc',
+      seq: 7,
+      depth: 2,
+    })
+    // Omitting seq selects the session-lineage shape; the seam discriminates on its absence.
+    expect(buildRequest({ operation: 'trace', session_id: 'abc' }, '/root', 100))
+      .toEqual({ operation: 'trace', indexRoot: '/root', sessionId: 'abc' })
+  })
+
+  it('clamps a negative window or depth to zero rather than sending a negative bound', () => {
+    expect(buildRequest({ operation: 'event', session_id: 'a', seq: 1, window_before: -5, window_after: -1 }, '/root', 100))
+      .toMatchObject({ windowBefore: 0, windowAfter: 0 })
+    expect(buildRequest({ operation: 'trace', session_id: 'a', depth: -2 }, '/root', 100)).toMatchObject({ depth: 0 })
   })
 
   it('applies the per-operation default limit when the model names none', () => {
@@ -135,8 +219,14 @@ describe('buildRequest', () => {
     expect(() => buildRequest({ operation: 'search', query: '   ' }, '/root', 100)).toThrow(/requires a non-empty "query"/)
   })
 
-  it('rejects a session without a session id', () => {
+  it('rejects a session, event or trace without a session id', () => {
     expect(() => buildRequest({ operation: 'session' }, '/root', 100)).toThrow(/requires a non-empty "session_id"/)
+    expect(() => buildRequest({ operation: 'event', seq: 1 }, '/root', 100)).toThrow(/requires a non-empty "session_id"/)
+    expect(() => buildRequest({ operation: 'trace' }, '/root', 100)).toThrow(/requires a non-empty "session_id"/)
+  })
+
+  it('rejects an event without a seq', () => {
+    expect(() => buildRequest({ operation: 'event', session_id: 'a' }, '/root', 100)).toThrow(/requires a numeric "seq"/)
   })
 
   it('rejects an operation outside the closed vocabulary', () => {

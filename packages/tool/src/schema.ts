@@ -1,6 +1,12 @@
 /**
- * The `sessiongraph` tool family's model-facing schemas: the parameters the model fills in, the
+ * The `sessiongraph` tool's model-facing schemas: the parameters the model fills in, the
  * per-operation defaults the seam refuses to guess, and the canonical value each operation returns.
+ *
+ * The tool exposes one operation vocabulary of eight names: the seam's seven query operations
+ * (`SESSIONGRAPH_OPERATIONS`) plus `index`. An index run is a write, so it is deliberately not a seam
+ * query operation — the tool routes it to `ctx.sessiongraph.index()` instead — but the model should
+ * not have to know which side of the seam a question lives on, and one tool with one parameter
+ * schema costs less permanent context than two.
  *
  * The query vocabulary itself is owned by the seam (`SESSIONGRAPH_OPERATIONS`,
  * `SESSIONGRAPH_ENTRY_KINDS`) and re-exported here rather than copied, so adding an entry kind in the
@@ -16,17 +22,13 @@ import type { SessiongraphOperation } from 'dsh-plugin-sessiongraph-service'
 
 export { SESSIONGRAPH_ENTRY_KINDS, SESSIONGRAPH_OPERATIONS }
 
-/**
- * Every operation the tool family exposes: the seam's five query operations plus `index`, which lives
- * on the dedicated `sessiongraph_index` tool because a full index run needs its own, much larger
- * timeout budget than a query.
- */
+/** Every operation the one model-facing tool exposes: the seam's queries plus the write. */
 export const SESSIONGRAPH_TOOL_OPERATIONS = [...SESSIONGRAPH_OPERATIONS, 'index'] as const
 
-/** One operation across the tool family. */
+/** One operation across the tool. */
 export type SessiongraphToolOperation = (typeof SESSIONGRAPH_TOOL_OPERATIONS)[number]
 
-/** One query-side operation, i.e. everything `sessiongraph` answers and `sessiongraph_index` does not. */
+/** One query-side operation, i.e. everything the tool answers through `ctx.sessiongraph.query`. */
 export type SessiongraphQueryOperation = SessiongraphOperation
 
 /**
@@ -43,7 +45,7 @@ export const SESSIONGRAPH_DEFAULT_LIMITS = {
   workspaces: 50,
 } as const
 
-/** One session's metadata, as the timeline and session operations report it. */
+/** One session's metadata, as the timeline, session, event and trace operations report it. */
 const SESSION_SUMMARY = {
   type: 'object',
   additionalProperties: false,
@@ -118,6 +120,52 @@ const FAILED_SESSION = {
   },
 } as const
 
+/** One event reduced to the fields that let a reader orient around a target. */
+const RAW_EVENT_SUMMARY = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    seq: { type: 'integer', required: true },
+    time: { type: 'integer', required: true },
+    type: { type: 'string', required: true },
+  },
+} as const
+
+/** One event exactly as the session log holds it, payload included and unabridged. */
+const RAW_EVENT = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    seq: { type: 'integer', required: true },
+    time: { type: 'integer', required: true },
+    type: { type: 'string', required: true },
+    // The log's event vocabulary belongs to `dsh-session`; the tool passes the payload through.
+    data: { type: 'json', required: true },
+  },
+} as const
+
+/** The event object an `event` answer carries, marked required by its holder. */
+const REQUIRED_RAW_EVENT_SUMMARY = { ...RAW_EVENT_SUMMARY, required: true } as const
+
+/** The unabridged event object an `event` answer carries, marked required by its holder. */
+const REQUIRED_RAW_EVENT = { ...RAW_EVENT, required: true } as const
+
+/**
+ * One descendant in a lineage walk, flattened with its distance from the target.
+ *
+ * The seam answers a recursive tree, but this schema DSL has no `$ref`, and an unbounded recursive
+ * value type would be either inaccurate or unexpressible. Flattening a depth-first walk keeps every
+ * fact (the order, and each node's distance) while rendering as the same indented tree.
+ */
+const TRACE_DESCENDANT = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    session: REQUIRED_SESSION_SUMMARY,
+    depth: { type: 'integer', required: true },
+  },
+} as const
+
 /** Bounds every truncatable member reports, so a capped answer is never read as a complete one. */
 const COUNTS = {
   total: { type: 'integer', required: true },
@@ -158,7 +206,7 @@ function member<const O extends SessiongraphToolOperation, const P extends Recor
   } as const
 }
 
-/** The canonical value every `sessiongraph` or `sessiongraph_index` call returns, keyed on `operation`. */
+/** The canonical value every `sessiongraph` call returns, keyed on `operation`. */
 export const SESSIONGRAPH_OUTPUT_SCHEMA = {
   oneOf: [
     member('search', {
@@ -171,6 +219,35 @@ export const SESSIONGRAPH_OUTPUT_SCHEMA = {
       entries: { type: 'array', required: true, items: ENTRY },
       children: { type: 'array', required: true, items: { type: 'string' } },
       truncated: { type: 'boolean', required: true },
+      ...STALE,
+    }),
+    // The event operation answers from the source log, so its payload is the original bytes — the
+    // one place the model sees unclipped tool output. `data` is opaque JSON on purpose.
+    member('event', {
+      session: REQUIRED_SESSION_SUMMARY,
+      event: REQUIRED_RAW_EVENT,
+      before: { type: 'array', required: true, items: RAW_EVENT_SUMMARY },
+      after: { type: 'array', required: true, items: RAW_EVENT_SUMMARY },
+      ...STALE,
+    }),
+    // Two trace shapes share the operation name and differ on `kind`: a session lineage walk, and one
+    // event's replacement/citation relationships. Both are cheap to describe as separate members, and
+    // a renderer switching on `kind` then sees only the fields that shape produces.
+    member('trace', {
+      kind: { type: 'string', required: true, const: 'session' },
+      target: REQUIRED_SESSION_SUMMARY,
+      ancestors: { type: 'array', required: true, items: SESSION_SUMMARY },
+      descendants: { type: 'array', required: true, items: TRACE_DESCENDANT },
+      complete: { type: 'boolean', required: true },
+      ...STALE,
+    }),
+    member('trace', {
+      kind: { type: 'string', required: true, const: 'event' },
+      session: REQUIRED_SESSION_SUMMARY,
+      event: REQUIRED_RAW_EVENT_SUMMARY,
+      replaced_by: { type: 'array', required: true, items: { type: 'integer' } },
+      shadowed_seqs: { type: 'array', required: true, items: { type: 'integer' } },
+      source_event_seqs: { type: 'array', required: true, items: { type: 'integer' } },
       ...STALE,
     }),
     member('timeline', {
@@ -226,17 +303,21 @@ export const SESSIONGRAPH_OUTPUT_SCHEMA = {
 } as const
 
 /**
- * The parameters the model fills in for the query tool. Which ones apply depends on `operation`; the
- * conditional requirements (`query` for `search`, `session_id` for `session`) are enforced when the
- * request is built, because the parameter DSL has no per-operation conditionals.
+ * The parameters the model fills in. Which ones apply depends on `operation`; the conditional
+ * requirements (`query` for `search`, `session_id` for `session`/`event`/`trace`, `seq` for `event`)
+ * are enforced when the request is built, because the parameter DSL has no per-operation
+ * conditionals.
  */
 export const SESSIONGRAPH_PARAMETERS = {
   operation: {
     type: 'string',
     required: true,
-    enum: [...SESSIONGRAPH_OPERATIONS],
+    enum: [...SESSIONGRAPH_TOOL_OPERATIONS],
     description:
-      'search（跨会话全文检索）、session（按 id 或唯一前缀读一个会话）、timeline（按时间列会话，新→旧）、workspaces（工作区清单与统计）、status（索引自身状态）。status 是唯一在还没有索引时也能回答的操作；要建或刷新索引请调用 sessiongraph_index 工具。',
+      'search（跨会话全文检索）、session（按 id 或唯一前缀读一个会话）、event（读某一条原始事件，含前后窗口）、'
+      + 'trace（追踪会话血缘，或某条事件的替换/引用关系）、timeline（按时间列会话，新→旧）、'
+      + 'workspaces（工作区清单与统计）、status（索引自身状态）、index（建或刷新索引）。'
+      + 'status 是唯一在还没有索引时也能回答的操作；索引不存在时其它操作会失败，先跑 index。',
   },
   query: {
     type: 'string',
@@ -244,11 +325,31 @@ export const SESSIONGRAPH_PARAMETERS = {
   },
   session_id: {
     type: 'string',
-    description: 'session 必填：完整会话 id，或长到只指向一个会话的前缀。',
+    description:
+      'session / event / trace 必填，search 可选：完整会话 id，或长到只指向一个会话的前缀。'
+      + 'search 带上它就在这一个会话里检索；session 打开该会话。',
+  },
+  seq: {
+    type: 'number',
+    description:
+      'event 必填：目标事件的 seq。trace 给出时追踪这一条事件的关系（replacedBy / shadowedSeqs / sourceEventSeqs），'
+      + '省略则追踪会话血缘。',
+  },
+  window_before: {
+    type: 'number',
+    description: 'event 可选：额外返回目标事件之前的多少条原始事件摘要（默认 0）。',
+  },
+  window_after: {
+    type: 'number',
+    description: 'event 可选：额外返回目标事件之后的多少条原始事件摘要（默认 0）。',
+  },
+  depth: {
+    type: 'number',
+    description: 'trace 可选：向下追踪的最大层数；省略表示整棵树。',
   },
   workspace: {
     type: 'string',
-    description: '只看某个工作区：精确的 cwd，或不带结尾斜杠的路径前缀。',
+    description: '只看某个工作区：精确的 cwd，或不带结尾斜杠的路径前缀；也可用于 index 限定索引范围。',
   },
   after: {
     type: 'number',
@@ -264,6 +365,12 @@ export const SESSIONGRAPH_PARAMETERS = {
     description:
       '只看这些条目类型：user（人真正打的字）、assistant（模型可见回复）、tool（工具调用的名字与参数）、title（会话标题）。省略即全部。',
   },
+  dedupe_by_session: {
+    type: 'boolean',
+    description:
+      'search 可选：每个会话最多返回一条（最强的那条）。默认 true；只给了 session_id 做单会话检索时默认 false，'
+      + '因为那样只会剩一条结果。',
+  },
   limit: {
     type: 'number',
     description:
@@ -273,25 +380,9 @@ export const SESSIONGRAPH_PARAMETERS = {
     type: 'number',
     description: '跳过前多少条，用于翻页。',
   },
-} as const
-
-/**
- * The parameters the dedicated `sessiongraph_index` tool takes: what to (re)build. It needs no
- * `operation` — building the index is the only thing this tool does — and none of the query-side
- * fields (`query`, `limit`, …), which an index run has no use for.
- */
-export const SESSIONGRAPH_INDEX_PARAMETERS = {
   force: {
     type: 'boolean',
-    description: '全量重建：不跳过源文件自上次索引后没有变化的会话。',
-  },
-  workspace: {
-    type: 'string',
-    description: '只索引 cwd 匹配这个工作区（精确，或不带结尾斜杠的路径前缀）的会话。',
-  },
-  session_id: {
-    type: 'string',
-    description: '只索引一个会话，按完整 id 或唯一前缀。',
+    description: 'index 可选：全量重建，不跳过源文件自上次索引后没有变化的会话。',
   },
 } as const
 
@@ -300,9 +391,6 @@ export type SessiongraphToolValue = InferValue<typeof SESSIONGRAPH_OUTPUT_SCHEMA
 
 /** The validated arguments, inferred from {@link SESSIONGRAPH_PARAMETERS}. */
 export type SessiongraphToolArgs = InferArgs<typeof SESSIONGRAPH_PARAMETERS>
-
-/** The validated arguments, inferred from {@link SESSIONGRAPH_INDEX_PARAMETERS}. */
-export type SessiongraphIndexToolArgs = InferArgs<typeof SESSIONGRAPH_INDEX_PARAMETERS>
 
 /** The canonical value for one operation. */
 export type SessiongraphValueFor<O extends SessiongraphToolOperation> =

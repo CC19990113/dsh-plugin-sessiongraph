@@ -1,15 +1,22 @@
 /**
- * Model-facing `sessiongraph` tool family over `ctx.sessiongraph`. The `sessiongraph` tool is
- * read-only, with five operations — `search`, `session`, `timeline`, `workspaces`, `status` — that
- * answer from a pre-built index of every local conversation. A second tool, `sessiongraph_index`,
- * builds or refreshes that index on explicit request; it is separate so it can carry its own, much
- * larger timeout budget than a query, because `defineTool`'s `timeoutMs` is fixed per registration,
- * not per call, and one budget cannot fit both a millisecond query and a whole-machine index run.
+ * The model-facing `sessiongraph` tool over `ctx.sessiongraph`: one tool, eight operations.
  *
- * The tools own every default the seam refuses to guess — the per-operation result limits, the cap on
- * a snippet — so the seam's requests stay fully specified and a deployment can retune what the model
- * reads without touching a store. They inject only `tools`, `sessiongraph`, and `systemPrompt`, and
- * import no store: which index answers is the seam's routing decision.
+ * Seven of them are the seam's read operations — `search`, `session`, `event`, `trace`, `timeline`,
+ * `workspaces`, `status` — answered from a pre-built index of every local conversation (and, for
+ * `event`, from the source log itself). The eighth, `index`, is a write: it routes to
+ * `ctx.sessiongraph.index()` rather than pretending a query provider can build an index.
+ *
+ * One tool rather than two because a tool definition costs permanent schema tokens, and the host's
+ * `timeoutMs` is fixed per registration, not per call. The old split existed only so indexing could
+ * carry a three-hundred-second budget; that is now solved by measurement instead — a run on an index
+ * whose sidecar already reports `backgroundIndexThreshold` sessions is handed to the host's job
+ * registry through `ctx.jobs.start`, and the call answers at once with a job id. Everything else
+ * runs inside the one thirty-second budget.
+ *
+ * The tool owns every default the seam refuses to guess — the per-operation result limits, the cap on
+ * a snippet, the background threshold — so the seam's requests stay fully specified and a deployment
+ * can retune what the model reads without touching a store. It injects only `tools`, `sessiongraph`,
+ * and `systemPrompt`, and imports no store: which index answers is the seam's routing decision.
  *
  * Namespace plugin (named exports, no default export).
  * @module dsh-plugin-sessiongraph-tool
@@ -23,6 +30,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { INDEX_RELATIVE_PATH, SessiongraphError } from 'dsh-plugin-sessiongraph-service'
 import type {
+  SessiongraphEventResult,
   SessiongraphIndexOptions,
   SessiongraphIndexReport,
   SessiongraphRequest,
@@ -33,33 +41,39 @@ import type {
   SessiongraphSessionSummary,
   SessiongraphStatusResult,
   SessiongraphTimelineResult,
+  SessiongraphTraceNode,
+  SessiongraphTraceResult,
   SessiongraphWorkspacesResult,
 } from 'dsh-plugin-sessiongraph-service'
-import { isBackgroundIndexReport } from 'dsh-plugin-sessiongraph-sessions'
+import {
+  AUTO_INDEX_JOB_KIND,
+  DEFAULT_BACKGROUND_INDEX_THRESHOLD as SESSIONS_BACKGROUND_INDEX_THRESHOLD,
+  isBackgroundIndexReport,
+} from 'dsh-plugin-sessiongraph-sessions'
 import type { SessiongraphBackgroundIndexReport } from 'dsh-plugin-sessiongraph-sessions'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { registerCommands } from './command.ts'
+import { applyPanel } from './panel.ts'
 import { LazyIndexRefresher } from './refresh.ts'
 import type { SynchronousIndexOptions } from './refresh.ts'
 import { renderSessiongraph } from './render.ts'
 import type { RenderOptions } from './render.ts'
 import {
   SESSIONGRAPH_DEFAULT_LIMITS,
-  SESSIONGRAPH_INDEX_PARAMETERS,
   SESSIONGRAPH_OUTPUT_SCHEMA,
   SESSIONGRAPH_PARAMETERS,
 } from './schema.ts'
 import type {
-  SessiongraphIndexToolArgs,
   SessiongraphToolArgs,
   SessiongraphToolValue,
   SessiongraphValueFor,
 } from './schema.ts'
-import { agentIdOf, indexStatusHint } from './status-hint.ts'
+import { agentIdOf, indexStatusHint, readIndexStatus } from './status-hint.ts'
 import { createUpdateChecker, defaultStateFile, DEFAULT_UPDATE_CHECK_INTERVAL_MS, readOwnVersion } from './version-check.ts'
 import type { UpdateChecker } from './version-check.ts'
 import { createHistoryHintState, noteHistoryToolUse, registerHistoryHint } from './history-hint.ts'
+import { applyVisibility } from './visibility.ts'
 
 // The seam package does not publish this augmentation itself yet; declaring it here is what lets
 // `ctx.sessiongraph` be typed as the facade the service class implements. It is a pure type-level
@@ -73,12 +87,10 @@ declare module '@deepseek-ai/cordis' {
 export {
   SESSIONGRAPH_DEFAULT_LIMITS,
   SESSIONGRAPH_ENTRY_KINDS,
-  SESSIONGRAPH_INDEX_PARAMETERS,
   SESSIONGRAPH_OPERATIONS,
   SESSIONGRAPH_OUTPUT_SCHEMA,
   SESSIONGRAPH_PARAMETERS,
   SESSIONGRAPH_TOOL_OPERATIONS,
-  type SessiongraphIndexToolArgs,
   type SessiongraphQueryOperation,
   type SessiongraphToolArgs,
   type SessiongraphToolOperation,
@@ -138,17 +150,26 @@ export const inject = ['tools', 'sessiongraph', 'systemPrompt']
 /** Default directory the index lives in, before `~` expansion. */
 export const DEFAULT_INDEX_ROOT = '~/.dsh/sessiongraph'
 
-/** Default tool-call timeout budget (ms) for the query-side `sessiongraph` tool. */
+/** Tool-call timeout budget (ms) for the one `sessiongraph` tool. */
 export const DEFAULT_SESSIONGRAPH_TOOL_TIMEOUT_MS = 30_000
-
-/** Default timeout budget (ms) for the `sessiongraph_index` tool. Indexing every local session is a different order of work than a query. */
-export const DEFAULT_SESSIONGRAPH_INDEX_TIMEOUT_MS = 300_000
 
 /** Largest `limit` honored when the plugin config names none. */
 export const DEFAULT_MAX_LIMIT = 100
 
 /** Default character cap for one rendered snippet or session entry. */
 export const DEFAULT_MAX_SNIPPET_CHARS = 600
+
+/**
+ * Index size (sessions) at or above which an `index` call is handed to the host's job registry
+ * instead of running inside the tool's thirty-second budget.
+ *
+ * Measured off the sidecar the previous run wrote: it describes what the index actually holds, which
+ * is the run's real size once an index exists. A root with no sidecar runs in place — a first build
+ * has nothing to measure, and the model explicitly asked for it.
+ */
+// Sourced from the package that also uses the same number for its own automatic refresh, so the two
+// decisions can never drift into "the tool backgrounded it, the indexer did not".
+export const DEFAULT_BACKGROUND_INDEX_THRESHOLD = SESSIONS_BACKGROUND_INDEX_THRESHOLD
 
 /**
  * Default age (ms) at which a query refreshes the index before answering. The indexer keeps a
@@ -163,10 +184,12 @@ export const SESSIONGRAPH_PROMPT_TEXT =
   '查我自己过去的对话（「上次在哪个会话里说过/做过什么」）用 sessiongraph，不要 grep ~/.dsh/sessions：'
   + '那里的会话按工作区散在子目录里，是 zstd 压缩的 JSONL，grep 读不到正文，解压全量也慢。'
   + 'sessiongraph 从预建索引回答：search 跨会话全文检索（中文按双字切分，两字词即可命中，如「广告」）、'
-  + 'session 按 id 或唯一前缀打开一个会话、timeline 按时间列会话、workspaces 列工作区统计。'
+  + 'session 按 id 或唯一前缀打开一个会话、event 读某一条原始事件（可带前后窗口）、'
+  + 'trace 追会话血缘或事件的替换/引用关系、timeline 按时间列会话、workspaces 列工作区统计。'
   + '索引超过几分钟没更新时，查询前会自动跑一次增量刷新（很快，失败也照常回答，只是结果可能少几条）。'
   + '索引包含正在进行的会话，所以刚才说的话通常也能查到（取决于上次刷新时间）；status 里的实时会话数会随会话启停变化，不是索引坏了。'
-  + '索引不存在时 status 仍能回答，其它操作会失败；要强制全量重建用 sessiongraph_index，它有独立的更长预算（日志很多时它会转成后台 job 并返回 jobId，用 job_output 取报告）。'
+  + '索引不存在时 status 仍能回答，其它操作会失败；要建或全量重建用 operation=index（可带 force），'
+  + '日志很多时它会转成后台 job 并返回 jobId，用 job_output 取报告。'
 
 /** Plugin configuration: the defaults and caps the seam requires the consumer to own. */
 export interface Config {
@@ -188,12 +211,23 @@ export interface Config {
    * way. Set true only if you want the model to see what you just searched.
    */
   injectCommandResults?: boolean
-  /** Tool-call timeout budget in ms for the query-side `sessiongraph` tool (default 30000). */
+  /** Tool-call timeout budget in ms for the one `sessiongraph` tool (default 30000). */
   timeoutMs?: number
-  /** Tool-call timeout budget in ms for the `sessiongraph_index` tool (default 300000). */
-  indexTimeoutMs?: number
   /**
-   * Whether to ask the registry for a newer release after this plugin's tools are used, and append one
+   * Session count at or above which an `index` call becomes a host background job (default 1000).
+   * Below it the run happens inside the tool's own timeout budget, so a small or first-time index
+   * still answers with its report in the same turn.
+   */
+  backgroundIndexThreshold?: number
+  /**
+   * Which session-reading surface this profile exposes: this plugin's `sessiongraph` tool only
+   * (`sessiongraph`, the default), the host's built-in kernel session tools only (`kernel`), or
+   * both (`both`). Visibility is applied by `visibility.ts`, which hides or shows the kernel tools;
+   * this plugin's own tool is always registered.
+   */
+  toolSet?: 'sessiongraph' | 'kernel' | 'both'
+  /**
+   * Whether to ask the registry for a newer release after this plugin's tool is used, and append one
    * notice to the next step when there is one (default true). The notice is a user-role message, so it
    * reaches the model and the user both; it is emitted once per release and never blocks a tool call.
    * Turn this off in an offline or air-gapped deployment, where the check can only time out.
@@ -222,16 +256,19 @@ export const Config: z<Config> = z.object({
   freshnessThresholdMs: z.number().default(DEFAULT_FRESHNESS_THRESHOLD_MS),
   injectCommandResults: z.boolean().default(false),
   timeoutMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_SESSIONGRAPH_TOOL_TIMEOUT_MS),
-  indexTimeoutMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_SESSIONGRAPH_INDEX_TIMEOUT_MS),
+  backgroundIndexThreshold: z.number().default(DEFAULT_BACKGROUND_INDEX_THRESHOLD),
+  toolSet: z.union([z.const('sessiongraph'), z.const('kernel'), z.const('both')]).default('sessiongraph'),
   updateCheck: z.boolean().default(true),
   updateCheckIntervalMs: z.number().default(DEFAULT_UPDATE_CHECK_INTERVAL_MS),
   historyHint: z.boolean().default(true),
 })
 
-type ResolvedConfig = Required<Config>
+/** The config shape `apply` actually sees: every field defaulted by {@link Config}. */
+export type ResolvedConfig = Required<Config>
 
 /**
- * Register both tools and the system-prompt guidance.
+ * Register the one tool, the system-prompt guidance, the optional human surface, and the optional
+ * visibility/panel wiring.
  * @param ctx - the plugin context (must inject `tools`, `sessiongraph`, `systemPrompt`).
  * @param config - the resolved plugin configuration.
  */
@@ -240,8 +277,8 @@ export function apply(ctx: Context, config: Config): void {
   assertPositiveInteger('maxLimit', resolved.maxLimit)
   assertPositiveInteger('maxSnippetChars', resolved.maxSnippetChars)
   assertNonNegativeInteger('freshnessThresholdMs', resolved.freshnessThresholdMs)
+  assertNonNegativeInteger('backgroundIndexThreshold', resolved.backgroundIndexThreshold)
   assertTimer('timeoutMs', resolved.timeoutMs)
-  assertTimer('indexTimeoutMs', resolved.indexTimeoutMs)
   if (resolved.indexRoot.trim() === '') {
     throw new Error('tool-sessiongraph: indexRoot must be a non-empty directory path')
   }
@@ -249,7 +286,7 @@ export function apply(ctx: Context, config: Config): void {
   const renderOptions: RenderOptions = { maxSnippetChars: resolved.maxSnippetChars }
 
   // Version checking is a convenience, never a dependency: turned off, or with an unreachable
-  // registry, the tools behave exactly as before. It only ever speaks after one of them ran — see
+  // registry, the tool behaves exactly as before. It only ever speaks after the tool ran — see
   // `version-check.ts` for why that gate exists and what keeps it from repeating.
   const updateChecker = resolved.updateCheck
     ? createUpdateChecker({
@@ -261,7 +298,7 @@ export function apply(ctx: Context, config: Config): void {
     : undefined
 
   // Process-local, one instance per registration: a second query in this process joins the run in
-  // flight instead of starting a second incremental index. `sessiongraph_index` never goes through
+  // flight instead of starting a second incremental index. The `index` operation never goes through
   // it — an explicit refresh is asked for, not decided by a clock.
   const refresher = new LazyIndexRefresher({
     indexRoot,
@@ -270,9 +307,9 @@ export function apply(ctx: Context, config: Config): void {
       ctx.sessiongraph.index(indexRoot, options, signal),
   })
 
-  // Shared between the tools and the pre-step hook: a conversation that already reached the index
-  // must not be told the index exists. Kept even when the hint is off, so turning the reminder back
-  // on mid-process cannot re-nag a conversation that has been using the tool all along.
+  // Shared between the tool and the pre-step hook: a conversation that already reached the index must
+  // not be told the index exists. Kept even when the hint is off, so turning the reminder back on
+  // mid-process cannot re-nag a conversation that has been using the tool all along.
   const historyHintState = createHistoryHintState()
 
   // A function, not a string: the host re-evaluates it on every assembly, which is what lets the model
@@ -287,7 +324,11 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'sessiongraph',
     description:
-      '检索本机全部 DSH 会话的历史对话（不是代码）：跨会话全文搜索「上次在哪个会话里说过/做过什么」、按 id 打开一个会话、按时间列会话、列工作区统计、看索引状态。答案来自预建索引，比 grep ~/.dsh/sessions 更快也更完整（那里的 JSONL 是 zstd 压缩的，grep 读不到）。中文按两字词检索即可命中（如「广告」）。要建或刷新索引请调用 sessiongraph_index；没有索引时除 status 外都会失败。',
+      '检索本机全部 DSH 会话的历史对话（不是代码）：跨会话全文搜索「上次在哪个会话里说过/做过什么」、按 id 打开一个会话、'
+      + '读某一条原始事件、追踪会话血缘或事件的替换/引用关系、按时间列会话、列工作区统计、看索引状态、建/刷新索引。'
+      + '答案来自预建索引，比 grep ~/.dsh/sessions 更快也更完整（那里的 JSONL 是 zstd 压缩的，grep 读不到）。'
+      + '中文按两字词检索即可命中（如「广告」）。索引不存在时除 status 外都会失败，先跑 operation=index；'
+      + '日志很多时 index 会转成后台 job 返回 jobId，用 job_output 取报告。',
     parameters: SESSIONGRAPH_PARAMETERS,
     output: {
       schema: SESSIONGRAPH_OUTPUT_SCHEMA,
@@ -297,50 +338,30 @@ export function apply(ctx: Context, config: Config): void {
     async execute(args, exec) {
       updateChecker?.noteToolUse(agentIdOf(exec))
       noteHistoryToolUse(historyHintState, exec)
-      return runQuery(ctx, refresher, indexRoot, resolved, args, exec)
+      return runOperation(ctx, refresher, indexRoot, resolved, args, exec)
     },
     presentCall: args => ({
       card: 'generic' as const,
       title: callTitle(args),
-      kind: 'search' as const,
+      kind: args.operation === 'index' ? 'execute' as const : 'search' as const,
       rawInput: args,
     }),
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'sessiongraph_index',
-    description:
-      '建立或刷新 sessiongraph 索引，让 sessiongraph 工具能检索本机会话历史。首次运行会扫描 ~/.dsh/sessions 下的全部会话，可能耗时几十秒到几分钟，所以它有独立的 300 秒预算，与查询的预算分开。源文件自上次索引后没有变化的会话会被跳过，重复调用很便宜；源会话消失时它的条目会从索引里移除。会话日志很多时，这次调用会转成宿主后台任务并立刻返回 jobId（status: started），用 job_output 取运行报告。',
-    parameters: SESSIONGRAPH_INDEX_PARAMETERS,
-    output: {
-      schema: SESSIONGRAPH_OUTPUT_SCHEMA,
-      render: (args, value) => [{ type: 'text', text: renderSessiongraph(args, value, renderOptions) }],
-    },
-    timeoutMs: resolved.indexTimeoutMs,
-    async execute(args, exec) {
-      updateChecker?.noteToolUse(agentIdOf(exec))
-      noteHistoryToolUse(historyHintState, exec)
-      return runIndex(ctx, indexRoot, args, exec)
-    },
-    presentCall: args => {
-      const subject = args.session_id ?? args.workspace
-      return {
-        card: 'generic' as const,
-        title: subject === undefined ? 'sessiongraph_index' : `sessiongraph_index ${subject}`,
-        kind: 'execute' as const,
-        rawInput: args,
-      }
-    },
-  }))
-
   // The human surface is optional: `ctx.inject` waits for the command registry when the host has
-  // one and silently does nothing when it does not, so a composition without it still gets both
-  // tools. Registered last so nothing about the model-facing surface depends on it.
+  // one and silently does nothing when it does not, so a composition without it still gets the tool.
+  // Registered last so nothing about the model-facing surface depends on it.
   registerCommands(ctx, {
     indexRoot,
     maxSnippetChars: resolved.maxSnippetChars,
     injectResults: resolved.injectCommandResults,
   })
+
+  // Which session-reading surface this profile exposes (this tool, the kernel's tools, or both).
+  // Both helpers are optional-by-construction: they do nothing when the services they speak to are
+  // absent, so a minimal composition still loads.
+  applyVisibility(ctx, resolved)
+  applyPanel(ctx, resolved)
 
   // The notice rides the host's step-admission waterfall: `agent/pre-step` is the one surface a
   // plugin has between a tool result and the next model request, and it is where the host itself
@@ -405,6 +426,62 @@ interface AgentPreStepDecision {
 }
 
 /**
+ * The slice of the host's background-job registry this tool calls.
+ *
+ * `@deepseek-ai/dsh-jobs` is deliberately not a dependency: the service is optional, and its absence
+ * simply means a large index run happens inside the tool's budget instead. The shape is structural,
+ * exactly as `packages/sessions` declares it, because the same registry backs both call sites.
+ */
+interface BackgroundJobRegistry {
+  /**
+   * Register a job and return its id immediately.
+   * @param spec - the job's owner, kind, label, and producer body.
+   * @returns the new job's id.
+   */
+  start(spec: BackgroundJobSpec): string
+}
+
+/** One index job's registration. */
+interface BackgroundJobSpec {
+  /** Session id of the agent that owns the job; its disposal cancels the work. */
+  readonly owner: string
+  /** Stable kind, used for retention and diagnostics. */
+  readonly kind: string
+  /** Human-readable label shown in job listings and completion notices. */
+  readonly label: string
+  /** The producer body, invoked once while the registration is being built. */
+  readonly run: (handle: BackgroundJobHandle) => BackgroundJobHooks
+}
+
+/** What a producer may write while its job runs. */
+interface BackgroundJobHandle {
+  /**
+   * Append one chunk of output to the job's log.
+   * @param text - the text to append, verbatim.
+   */
+  append(text: string): void
+}
+
+/** What a producer hands back so the registry can stop and await it. */
+interface BackgroundJobHooks {
+  /**
+   * Stop the work.
+   * @param reason - why the job was stopped, when the caller has a reason.
+   */
+  cancel(reason?: string): void
+  /** Settles once the producer is done, carrying the job's terminal outcome. */
+  readonly done: Promise<BackgroundJobOutcome>
+}
+
+/** The terminal report a producer settles with. */
+interface BackgroundJobOutcome {
+  /** Terminal status the registry records. */
+  readonly status: 'completed' | 'failed'
+  /** Failure detail, when the job failed. */
+  readonly detail?: string
+}
+
+/**
  * Append the "a newer release exists" notice to the next admitted step, once per release.
  *
  * Registered per agent rather than globally: the hook is agent-scoped in the host, its `next` only
@@ -439,7 +516,10 @@ export function registerUpdateNotice(ctx: Context, checker: UpdateChecker): void
  */
 export function callTitle(args: SessiongraphToolArgs): string {
   const subject = args.query ?? args.session_id ?? args.workspace
-  return subject === undefined ? `sessiongraph ${args.operation}` : `sessiongraph ${args.operation} ${subject}`
+  const seq = args.seq === undefined ? '' : ` #${String(Math.trunc(args.seq))}`
+  return subject === undefined
+    ? `sessiongraph ${args.operation}${seq}`
+    : `sessiongraph ${args.operation}${seq} ${subject}`
 }
 
 /**
@@ -447,8 +527,9 @@ export function callTitle(args: SessiongraphToolArgs): string {
  * defaults the seam refuses to guess.
  *
  * Conditional requirements live here rather than in the parameter schema, because the parameter DSL
- * has no per-operation conditionals: `search` needs `query`, `session` needs `session_id`, and a call
- * missing either is rejected before it can reach a store.
+ * has no per-operation conditionals: `search` needs `query`, `session`/`event`/`trace` need
+ * `session_id`, and `event` needs `seq`; a call missing one is rejected before it can reach a store.
+ * The `index` operation is not built here at all: it is a write, and `runIndexOperation` owns it.
  * @param args - the validated tool arguments.
  * @param indexRoot - absolute directory the index lives in.
  * @param maxLimit - largest `limit` honored, whatever the model asked for.
@@ -461,7 +542,8 @@ export function buildRequest(
 ): SessiongraphRequest {
   const offset = offsetOf(args.offset)
   switch (args.operation) {
-    case 'search':
+    case 'search': {
+      const sessionId = optionalString(args.session_id)
       return {
         operation: 'search',
         indexRoot,
@@ -470,9 +552,14 @@ export function buildRequest(
         ...(args.after === undefined ? {} : { after: timestamp('after', args.after) }),
         ...(args.before === undefined ? {} : { before: timestamp('before', args.before) }),
         ...(args.kinds === undefined || args.kinds.length === 0 ? {} : { kinds: args.kinds }),
+        ...(sessionId === undefined ? {} : { sessionId }),
+        // One hit per session is the useful default across conversations; inside one session it
+        // would answer with a single line, which is never what "search this conversation" means.
+        dedupeBySession: args.dedupe_by_session ?? sessionId === undefined,
         limit: bounded(args.limit, SESSIONGRAPH_DEFAULT_LIMITS.search, maxLimit),
         ...(offset === undefined ? {} : { offset }),
       }
+    }
     case 'session':
       return {
         operation: 'session',
@@ -481,6 +568,29 @@ export function buildRequest(
         limit: bounded(args.limit, SESSIONGRAPH_DEFAULT_LIMITS.session, maxLimit),
         ...(offset === undefined ? {} : { offset }),
       }
+    case 'event': {
+      const windowBefore = windowCount('window_before', args.window_before)
+      const windowAfter = windowCount('window_after', args.window_after)
+      return {
+        operation: 'event',
+        indexRoot,
+        sessionId: required(args, 'session_id', 'event'),
+        seq: requiredSeq(args, 'event'),
+        ...(windowBefore === undefined ? {} : { windowBefore }),
+        ...(windowAfter === undefined ? {} : { windowAfter }),
+      }
+    }
+    case 'trace': {
+      const eventSeq = optionalSeq(args)
+      const depth = windowCount('depth', args.depth)
+      return {
+        operation: 'trace',
+        indexRoot,
+        sessionId: required(args, 'session_id', 'trace'),
+        ...(eventSeq === undefined ? {} : { seq: eventSeq }),
+        ...(depth === undefined ? {} : { depth }),
+      }
+    }
     case 'timeline':
       return {
         operation: 'timeline',
@@ -498,7 +608,8 @@ export function buildRequest(
       }
     case 'status':
       return { operation: 'status', indexRoot }
-    /* v8 ignore next 3 -- exhaustive over the parameter schema's closed operation enum. */
+    /* v8 ignore next 4 -- `index` never reaches the query path, and the rest is exhaustive over the
+       parameter schema's closed operation enum. */
     default:
       throw new SessiongraphError(
         `unknown sessiongraph operation ${JSON.stringify(args.operation)}`,
@@ -522,6 +633,66 @@ function required(args: SessiongraphToolArgs, field: 'query' | 'session_id', ope
       'SESSIONGRAPH_INVALID_REQUEST',
     )
   }
+  return value
+}
+
+/**
+ * Read a required event sequence number.
+ * @param args - the validated tool arguments.
+ * @param operation - the operation being built, named in the failure.
+ * @returns the non-negative integer seq.
+ */
+function requiredSeq(args: SessiongraphToolArgs, operation: string): number {
+  const seq = optionalSeq(args)
+  if (seq === undefined) {
+    throw new SessiongraphError(
+      `the sessiongraph "${operation}" operation requires a numeric "seq"`,
+      'SESSIONGRAPH_INVALID_REQUEST',
+    )
+  }
+  return seq
+}
+
+/**
+ * Read an optional event sequence number, dropping values that cannot name one.
+ * @param args - the validated tool arguments.
+ * @returns the non-negative integer seq, or `undefined` when absent.
+ */
+function optionalSeq(args: SessiongraphToolArgs): number | undefined {
+  if (args.seq === undefined) return undefined
+  if (!Number.isFinite(args.seq)) {
+    throw new SessiongraphError(
+      'the sessiongraph "seq" argument must be a finite number',
+      'SESSIONGRAPH_INVALID_REQUEST',
+    )
+  }
+  return Math.max(0, Math.trunc(args.seq))
+}
+
+/**
+ * Read an optional window or depth bound, rejecting a value that is not a finite number.
+ * @param field - the argument name, named in the failure.
+ * @param value - the model-supplied number.
+ * @returns the non-negative integer, or `undefined` when absent.
+ */
+function windowCount(field: 'window_before' | 'window_after' | 'depth', value: number | undefined): number | undefined {
+  if (value === undefined) return undefined
+  if (!Number.isFinite(value)) {
+    throw new SessiongraphError(
+      `the sessiongraph "${field}" argument must be a finite number`,
+      'SESSIONGRAPH_INVALID_REQUEST',
+    )
+  }
+  return Math.max(0, Math.trunc(value))
+}
+
+/**
+ * Read an optional non-empty string argument.
+ * @param value - the model-supplied string.
+ * @returns the trimmed-non-empty value, or `undefined` when the model named none.
+ */
+function optionalString(value: string | undefined): string | undefined {
+  if (value === undefined || value.trim() === '') return undefined
   return value
 }
 
@@ -564,12 +735,7 @@ function bounded(value: number | undefined, fallback: number, max: number): numb
 }
 
 /**
- * Answer one query call.
- *
- * The request is validated first (a bad call must not spend a refresh), then the index is brought up
- * to date if the sidecar says it is older than the freshness threshold, and only then is the query
- * issued. Every refresh problem is non-fatal by construction: {@link LazyIndexRefresher.ensureFresh}
- * never rejects, and its outcome only adds the optional `stale` marker to the answer.
+ * Answer one call: the `index` write, the `status` self-description, or an index-backed query.
  * @param ctx - the plugin context.
  * @param refresher - the process-local lazy refresh coordinator for this index root.
  * @param indexRoot - absolute directory the index lives in.
@@ -578,7 +744,7 @@ function bounded(value: number | undefined, fallback: number, max: number): numb
  * @param exec - the tool-execution context.
  * @returns the canonical value for the requested operation.
  */
-async function runQuery(
+async function runOperation(
   ctx: Context,
   refresher: LazyIndexRefresher,
   indexRoot: string,
@@ -586,8 +752,9 @@ async function runQuery(
   args: SessiongraphToolArgs,
   exec: ToolExecution,
 ): Promise<SessiongraphToolValue> {
+  if (args.operation === 'index') return runIndexOperation(ctx, indexRoot, config, args, exec)
   // `status` describes the index itself; refreshing first would make it report a state it just
-  // changed, and the model uses it to decide whether to call `sessiongraph_index` at all.
+  // changed, and the model uses it to decide whether to call `index` at all.
   if (args.operation === 'status') return statusValue(ctx, indexRoot, exec.signal)
   const request = buildRequest(args, indexRoot, config.maxLimit)
   const refresh = await refresher.ensureFresh(exec.signal)
@@ -661,7 +828,7 @@ async function statusValue(ctx: Context, indexRoot: string, signal: AbortSignal)
 /**
  * Translate a seam failure into something a model can act on. A `SESSIONGRAPH_UNAVAILABLE` on a query
  * means the index has never been built — the raw "no store indexes this root" wording reads like a
- * broken installation, while the actionable answer is one tool call away.
+ * broken installation, while the actionable answer is one operation away.
  * @param error - whatever the seam threw.
  * @param indexRoot - absolute directory the index lives in.
  * @returns the error to throw: a clearer one, or the original when it needs no translation.
@@ -671,7 +838,7 @@ function explainQueryFailure(error: unknown, indexRoot: string): unknown {
   switch (error.code) {
     case 'SESSIONGRAPH_UNAVAILABLE':
       return new SessiongraphError(
-        `还没有索引（${indexRoot}），请先调用 sessiongraph_index 建一次；建好之前除 status 外的查询都会失败。`,
+        `还没有索引（${indexRoot}），请先调用 sessiongraph 的 index 操作建一次；建好之前除 status 外的操作都会失败。`,
         error.code,
       )
     case 'SESSIONGRAPH_NOT_FOUND':
@@ -681,7 +848,7 @@ function explainQueryFailure(error: unknown, indexRoot: string): unknown {
       )
     case 'SESSIONGRAPH_CORRUPT':
       return new SessiongraphError(
-        `${error.message}。索引文件损坏或版本不认识，用 sessiongraph_index 的 force 重建。`,
+        `${error.message}。索引文件损坏或版本不认识，用 index 操作的 force 重建。`,
         error.code,
       )
     default:
@@ -690,34 +857,42 @@ function explainQueryFailure(error: unknown, indexRoot: string): unknown {
 }
 
 /**
- * Build or refresh the on-disk index. The dedicated tool this backs carries its own, much larger
- * timeout budget than a query — indexing every session on the machine is a different order of work.
+ * Build or refresh the on-disk index.
+ *
+ * A large index is not answered inside a tool budget: when the sidecar says the index already holds
+ * `backgroundIndexThreshold` sessions, the run goes to the host's job registry and this call returns
+ * with a job id, which `job_output` later turns into the report. Every reason not to start a job —
+ * no registry, no owning session, a scoped run, a small index — falls back to running in place, so a
+ * first build still answers with its counts instead of costing a second round trip.
  * @param ctx - the plugin context.
  * @param indexRoot - absolute directory the index lives in.
- * @param args - the index tool's validated arguments.
+ * @param config - the resolved plugin configuration.
+ * @param args - the validated tool arguments.
  * @param exec - the tool-execution context.
  * @returns the index operation's canonical value.
  */
-async function runIndex(
+async function runIndexOperation(
   ctx: Context,
   indexRoot: string,
-  args: SessiongraphIndexToolArgs,
+  config: ResolvedConfig,
+  args: SessiongraphToolArgs,
   exec: ToolExecution,
 ): Promise<SessiongraphValueFor<'index'>> {
-  // The owning session id is a runtime extension of the seam's options, not part of its type: a
-  // job-capable indexer hands a large run to the host's job registry only when the caller names an
-  // owner, and this is the one call site that should allow it. Every indexer that does not read it
-  // simply runs in place, which is why this stays a plain optional property rather than a seam edit.
-  const options: SessiongraphIndexOptions & { readonly owner?: string } = {
+  const options: SessiongraphIndexOptions = {
     ...(args.force === undefined ? {} : { force: args.force }),
     ...(args.workspace === undefined ? {} : { workspace: args.workspace }),
     ...(args.session_id === undefined ? {} : { sessionId: args.session_id }),
-    ...(exec.agent === undefined ? {} : { owner: exec.agent.id }),
+  }
+  const owner = agentIdOf(exec)
+  if (owner !== undefined && shouldRunInBackground(indexRoot, config, options)) {
+    const jobId = startIndexJob(ctx, indexRoot, options, owner)
+    if (jobId !== undefined) return { operation: 'index', status: 'started', job_id: jobId }
   }
   try {
     const report = await ctx.sessiongraph.index(indexRoot, options, exec.signal)
-    // The seam types `index()` as returning a report, so a delegated run comes back as a report
-    // carrying `jobId`; the indexer's own guard is the one place that distinction is defined.
+    // An indexer may still delegate a run on its own (the sessions indexer does when it is handed an
+    // owner, which this call never does); a report carrying a job id is that escape hatch, not a
+    // finished run, and must not be rendered as one.
     return isBackgroundIndexReport(report) ? projectIndexStarted(report) : projectIndexReport(report)
   } catch (error) {
     if (error instanceof SessiongraphError && error.code === 'SESSIONGRAPH_UNAVAILABLE') {
@@ -731,6 +906,94 @@ async function runIndex(
 }
 
 /**
+ * Whether an index run is large enough to outlive a tool call.
+ *
+ * The sidecar is the measure, not the source file count: it describes what the index actually holds,
+ * which is the run's real size once one exists, and it is one synchronous file read — the same one
+ * prompt assembly already does. A root with no sidecar (a first build) runs in place. A scoped run
+ * touches one workspace or one session, so the round trip through `job_output` would cost more than
+ * the run itself.
+ * @param indexRoot - absolute directory the index lives in.
+ * @param config - the resolved plugin configuration.
+ * @param options - this call's index switches.
+ * @returns true when the run should be delegated to the host's job registry.
+ */
+function shouldRunInBackground(
+  indexRoot: string,
+  config: ResolvedConfig,
+  options: SessiongraphIndexOptions,
+): boolean {
+  if (options.workspace !== undefined || options.sessionId !== undefined) return false
+  const sessions = readIndexStatus(indexRoot)?.sessions
+  return sessions !== undefined && sessions >= config.backgroundIndexThreshold
+}
+
+/**
+ * Hand one index run to the host's background-job registry.
+ * @param ctx - the plugin context, consulted for the optional registry.
+ * @param indexRoot - absolute directory the index lives in.
+ * @param options - this call's index switches.
+ * @param owner - the owning session id, without which no job can be registered.
+ * @returns the started job's id, or `undefined` when this call must index in place.
+ */
+function startIndexJob(
+  ctx: Context,
+  indexRoot: string,
+  options: SessiongraphIndexOptions,
+  owner: string,
+): string | undefined {
+  try {
+    const jobs = ctx.get('jobs') as BackgroundJobRegistry | undefined
+    if (jobs === undefined) return undefined
+    return jobs.start({
+      owner,
+      kind: AUTO_INDEX_JOB_KIND,
+      label: `sessiongraph index ${indexRoot}`,
+      run: handle => runIndexJob(ctx, indexRoot, options, handle),
+    })
+  } catch {
+    // No controller serves this session, or the owner already holds its maximum number of jobs: both
+    // mean "do the work here instead", never "fail the model's call".
+    return undefined
+  }
+}
+
+/**
+ * The producer body of one index job: run the index synchronously, report its summary into the job's
+ * log, and settle the job with the outcome the registry records.
+ * @param ctx - the plugin context.
+ * @param indexRoot - absolute directory the index lives in.
+ * @param options - this call's index switches.
+ * @param handle - the job handle, for appending output.
+ * @returns the job's cancellation hook and settlement.
+ */
+function runIndexJob(
+  ctx: Context,
+  indexRoot: string,
+  options: SessiongraphIndexOptions,
+  handle: BackgroundJobHandle,
+): BackgroundJobHooks {
+  const controller = new AbortController()
+  const done = (async (): Promise<BackgroundJobOutcome> => {
+    try {
+      // Deliberately not the caller's signal: a background run outlives the call that started it, so
+      // aborting that call must not abort the job. The job's own cancel does.
+      const report = await ctx.sessiongraph.index(indexRoot, options, controller.signal)
+      handle.append(
+        `Indexed ${indexRoot}: ${report.sessions} sessions, ${report.entries} entries `
+        + `(${report.added} added, ${report.updated} updated, ${report.removed} removed).\n`,
+      )
+      return { status: 'completed' }
+    } catch (error) {
+      const message = describeError(error)
+      handle.append(`sessiongraph index failed for ${indexRoot}: ${message}\n`)
+      return { status: 'failed', detail: message }
+    }
+  })()
+  return { cancel: () => controller.abort(), done }
+}
+
+/**
  * Project one seam result into the model-facing value its operation declares.
  * @param result - the seam's answer.
  * @param stale - whether the answer may predate the conversation because the refresh did not finish.
@@ -740,6 +1003,8 @@ function projectResult(result: SessiongraphResult, stale: boolean): Sessiongraph
   switch (result.operation) {
     case 'search': return projectSearch(result, stale)
     case 'session': return projectSession(result, stale)
+    case 'event': return projectEvent(result, stale)
+    case 'trace': return projectTrace(result, stale)
     case 'timeline': return projectTimeline(result, stale)
     case 'workspaces': return projectWorkspaces(result, stale)
     case 'status': return projectStatus(result)
@@ -800,6 +1065,92 @@ function projectSession(result: SessiongraphSessionResult, stale: boolean): Sess
     truncated: result.truncated,
     ...staleField(stale),
   }
+}
+
+/**
+ * Project an event answer. The payload is passed through untouched: the whole point of this operation
+ * is the original bytes, which the index's clipped text could never give back.
+ * @param result - the seam's answer.
+ * @param stale - whether the answer may be behind the conversation.
+ * @returns the canonical `event` value.
+ */
+function projectEvent(result: SessiongraphEventResult, stale: boolean): SessiongraphValueFor<'event'> {
+  return {
+    operation: 'event',
+    session: projectSummary(result.session),
+    event: {
+      seq: result.event.seq,
+      time: result.event.time,
+      type: result.event.type,
+      // The seam types the payload as `unknown` on purpose (the log's vocabulary is `dsh-session`'s);
+      // the output schema declares it as arbitrary JSON, so this cast is the one place the two
+      // descriptions meet.
+      data: result.event.data as SessiongraphValueFor<'event'>['event']['data'],
+    },
+    before: result.before.map(projectRawEventSummary),
+    after: result.after.map(projectRawEventSummary),
+    ...staleField(stale),
+  }
+}
+
+/**
+ * Project one raw event summary.
+ * @param summary - the seam's summary.
+ * @returns the model-facing event identity.
+ */
+function projectRawEventSummary(summary: SessiongraphEventResult['before'][number]): SessiongraphValueFor<'event'>['before'][number] {
+  return { seq: summary.seq, time: summary.time, type: summary.type }
+}
+
+/**
+ * Project a trace answer, flattening the seam's recursive descendant tree into depth-first entries.
+ *
+ * The output schema DSL has no `$ref`, so a recursive value type cannot be expressed; flattening keeps
+ * every fact (order and distance) while still rendering as an indented tree.
+ * @param result - the seam's answer.
+ * @param stale - whether the answer may be behind the conversation.
+ * @returns the canonical `trace` value.
+ */
+function projectTrace(result: SessiongraphTraceResult, stale: boolean): SessiongraphValueFor<'trace'> {
+  if (result.kind === 'event') {
+    return {
+      operation: 'trace',
+      kind: 'event',
+      session: projectSummary(result.session),
+      event: projectRawEventSummary(result.event),
+      replaced_by: [...result.replacedBy],
+      shadowed_seqs: [...result.shadowedSeqs],
+      source_event_seqs: [...result.sourceEventSeqs],
+      ...staleField(stale),
+    }
+  }
+  return {
+    operation: 'trace',
+    kind: 'session',
+    target: projectSummary(result.target),
+    ancestors: result.ancestors.map(projectSummary),
+    descendants: flattenDescendants(result.descendants, 0),
+    complete: result.complete,
+    ...staleField(stale),
+  }
+}
+
+/**
+ * Walk a descendant tree depth-first into `{ session, depth }` entries.
+ * @param nodes - the tree level to flatten.
+ * @param depth - this level's distance from the target.
+ * @returns the flattened entries, in tree order.
+ */
+function flattenDescendants(
+  nodes: readonly SessiongraphTraceNode[],
+  depth: number,
+): Array<{ session: SessiongraphValueFor<'session'>['session']; depth: number }> {
+  const flat: Array<{ session: SessiongraphValueFor<'session'>['session']; depth: number }> = []
+  for (const node of nodes) {
+    flat.push({ session: projectSummary(node.session), depth })
+    flat.push(...flattenDescendants(node.descendants, depth + 1))
+  }
+  return flat
 }
 
 /**

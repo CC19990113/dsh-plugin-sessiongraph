@@ -63,6 +63,22 @@ import type { IndexedSession, IndexWriteResult } from './write.ts'
 
 export { decompressSessionLog, parseSessionLog } from './parse.ts'
 export type { ParsedEntry, ParsedSession, SessionParseLimits } from './parse.ts'
+export {
+  foldRawSurface,
+  isLiveSource,
+  parseRawEvents,
+  rawEventWindow,
+  readRawEvents,
+  traceRawEvent,
+} from './raw.ts'
+export type {
+  RawEventTrace,
+  RawEventWindow,
+  RawSessionEvent,
+  RawSessionLog,
+  RawSurfaceFold,
+  ReadRawEventsOptions,
+} from './raw.ts'
 export { scanSessions } from './scan.ts'
 export type { SessionFile } from './scan.ts'
 export { LIVE_SOURCE_PREFIX } from './live.ts'

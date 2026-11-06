@@ -30,6 +30,7 @@
     "provenance": false
   },
   "dependencies": {
+    "dsh-plugin-sessiongraph-panel": "workspace:^",
     "dsh-plugin-sessiongraph-service": "workspace:^",
     "dsh-plugin-sessiongraph-sessions": "workspace:^",
     "dsh-plugin-sessiongraph-sqlite": "workspace:^",

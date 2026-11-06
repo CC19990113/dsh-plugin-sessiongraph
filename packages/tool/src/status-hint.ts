@@ -105,7 +105,7 @@ export function indexStatusHint(indexRoot: string): string {
   if (index === undefined) {
     return `这台机器还没有 sessiongraph 索引（${indexPath}）。新会话创建时会在后台自动建一次：`
       + '它会扫描 ~/.dsh/sessions 下的全部会话，首次可能要几十秒到几分钟，不阻塞会话。'
-      + '要立刻建就调用 sessiongraph_index（它有独立的 300 秒预算）；建好之前除 status 外都会失败。'
+      + '要立刻建就调用 sessiongraph 的 index 操作（日志很多时它会转成后台 job 并返回 jobId）；建好之前除 status 外都会失败。'
   }
   const status = readIndexStatus(indexRoot)
   if (status !== undefined) {
@@ -114,7 +114,7 @@ export function indexStatusHint(indexRoot: string): string {
       + `最近一次建索引 ${formatTime(status.indexedAt)}。`
   }
   return `索引文件已存在（${indexPath}，${formatBytes(index.size)}，${formatTime(index.mtimeMs)} 更新），`
-    + '但没有 status 记录——规模与新鲜度用 sessiongraph status 查；怀疑过期时用 sessiongraph_index 刷新。'
+    + '但没有 status 记录——规模与新鲜度用 sessiongraph status 查；怀疑过期时用 sessiongraph 的 index 操作（force）刷新。'
 }
 
 /**

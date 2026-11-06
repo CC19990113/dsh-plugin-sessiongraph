@@ -19,9 +19,12 @@ import type {
   SessiongraphEntry,
   SessiongraphEntryKind,
   SessiongraphHit,
+  SessiongraphRawEvent,
+  SessiongraphRawEventSummary,
   SessiongraphSessionSummary,
   SessiongraphWorkspaceStat,
 } from 'dsh-plugin-sessiongraph-service'
+import type { RawSessionEvent } from 'dsh-plugin-sessiongraph-sessions'
 
 /** One row as `node:sqlite` returns it, before validation. */
 export type IndexRow = Record<string, unknown>
@@ -188,4 +191,28 @@ export function toWorkspaceStat(row: IndexRow): SessiongraphWorkspaceStat {
     firstAt: integer(row, 'first_at', what),
     lastAt: integer(row, 'last_at', what),
   }
+}
+
+/**
+ * Build a {@link SessiongraphRawEvent} from one parsed log event.
+ *
+ * Nothing is validated beyond the identity fields, and nothing is clipped: the payload is handed to
+ * the caller exactly as the log holds it. `data` is deliberately `unknown` — the log's event
+ * vocabulary belongs to the session runtime, and re-declaring it here would drift from it.
+ * @param event - one event parsed from a session log.
+ * @returns the seam's raw event record.
+ */
+export function toRawEvent(event: RawSessionEvent): SessiongraphRawEvent {
+  return { seq: event.seq, time: event.time, type: event.type, data: event.data }
+}
+
+/**
+ * Build a {@link SessiongraphRawEventSummary} from one parsed log event: its identity, without the
+ * payload. Windows around a target are answered as summaries because a `tool/result` can be
+ * megabytes, and a caller orienting around an event wants the shape of the conversation, not its body.
+ * @param event - one event parsed from a session log.
+ * @returns the seam's raw-event summary.
+ */
+export function toRawEventSummary(event: RawSessionEvent): SessiongraphRawEventSummary {
+  return { seq: event.seq, time: event.time, type: event.type }
 }

@@ -156,7 +156,7 @@ function harness(
     maxSnippetChars: 600,
     freshnessThresholdMs: options.threshold ?? THRESHOLD,
     timeoutMs: 30_000,
-    indexTimeoutMs: 300_000,
+    backgroundIndexThreshold: 1_000,
   }
   apply(ctx as unknown as Context, config)
   return { tools, calls, options: optionsSeen }
@@ -258,54 +258,5 @@ describe('lazy refresh through the registered tool', () => {
     expect(value).toMatchObject({ live_sessions: 2 })
     const text = tool(subject, 'sessiongraph').output.render({ operation: 'status' }, value)[0]?.text
     expect(text).toContain('实时会话：2 个（当前还在跑、未落盘）')
-  })
-
-  it('lets the manual index tool run on a fresh index, because the model asked for it', async () => {
-    writeStatus(FRESH)
-    const subject = harness(async () => report())
-    await tool(subject, 'sessiongraph_index').execute({}, exec('session-1'))
-
-    expect(subject.calls).toEqual(['index'])
-    expect(subject.options[0]).toEqual({ owner: 'session-1' })
-  })
-
-  it('reports the job id when a large manual run goes to the background', async () => {
-    const subject = harness(async () => ({ ...report(), jobId: 'job-7' }))
-    const value = await tool(subject, 'sessiongraph_index').execute({ force: true }, exec('session-1'))
-
-    expect(value).toEqual({ operation: 'index', status: 'started', job_id: 'job-7' })
-    const text = tool(subject, 'sessiongraph_index').output.render({}, value)[0]?.text
-    expect(text).toContain('已在后台建索引')
-    expect(text).toContain('job-7')
-    expect(text).toContain('sessiongraph status')
-  })
-
-  it('renders a completed manual run as a report even though it named its owner', async () => {
-    const subject = harness(async () => report())
-    const value = await tool(subject, 'sessiongraph_index').execute({}, exec('session-1'))
-
-    expect(value).toMatchObject({ operation: 'index', added: 0, skipped: 1, live_sessions: 0 })
-    expect('status' in (value as object)).toBe(false)
-    const text = tool(subject, 'sessiongraph_index').output.render({}, value)[0]?.text
-    expect(text).toContain('建索引完成')
-    expect(text).not.toContain('已在后台建索引')
-    expect(text).not.toContain('本次重放')
-  })
-
-  it('mentions the live sessions a completed run replayed', async () => {
-    const subject = harness(async () => ({ ...report(), liveSessions: 2 }))
-    const value = await tool(subject, 'sessiongraph_index').execute({}, exec('session-1'))
-
-    expect(value).toMatchObject({ live_sessions: 2 })
-    const text = tool(subject, 'sessiongraph_index').output.render({}, value)[0]?.text
-    expect(text).toContain('本次重放 2 个实时会话')
-  })
-
-  it('sends no owner when the call has no owning agent, so the indexer falls back to running in place', async () => {
-    const subject = harness(async () => report())
-    await tool(subject, 'sessiongraph_index').execute({}, exec())
-
-    expect(subject.options[0]).toEqual({})
-    expect('owner' in (subject.options[0] ?? {})).toBe(false)
   })
 })

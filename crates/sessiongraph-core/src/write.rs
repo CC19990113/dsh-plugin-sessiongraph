@@ -51,8 +51,8 @@ pub fn is_live_source(source_path: &str) -> bool {
 pub const STATUS_RELATIVE_PATH: &str = "status.json";
 
 /// `meta` keys the store and the indexer exchange through the file.
-const META_SCHEMA_VERSION: &str = "schema_version";
-const META_INDEXED_AT: &str = "indexed_at";
+pub(crate) const META_SCHEMA_VERSION: &str = "schema_version";
+pub(crate) const META_INDEXED_AT: &str = "indexed_at";
 const META_DISCOVERED: &str = "discovered";
 const META_FAILED: &str = "failed";
 

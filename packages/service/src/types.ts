@@ -11,8 +11,16 @@
 
 import type { SessiongraphIndexerId, SessiongraphSessionId, SessiongraphStoreId } from './brand.ts'
 
-/** Every query operation the seam answers. */
-export const SESSIONGRAPH_OPERATIONS = ['search', 'session', 'timeline', 'workspaces', 'status'] as const
+/**
+ * Every query operation the seam answers.
+ *
+ * `event` and `trace` were added when the model-facing surface collapsed from two tools into one:
+ * the built-in session tools could read a single unabridged event and follow replacement/citation
+ * relationships, and a replacement that dropped those answers would be a downgrade rather than a
+ * swap. An index run is deliberately **not** here — it writes, so the tool routes it through
+ * `Sessiongraph.index()` instead of pretending a query provider can build an index.
+ */
+export const SESSIONGRAPH_OPERATIONS = ['search', 'session', 'event', 'trace', 'timeline', 'workspaces', 'status'] as const
 
 /** One query operation. */
 export type SessiongraphOperation = (typeof SESSIONGRAPH_OPERATIONS)[number]
@@ -73,6 +81,22 @@ export interface SessiongraphSearchRequest extends SessiongraphRequestBase {
   before?: number
   /** Restrict to these entry kinds. Absent means every kind. */
   kinds?: readonly SessiongraphEntryKind[]
+  /**
+   * Restrict the search to one session: a full id, or a prefix long enough to identify exactly one.
+   *
+   * A prefix that matches several sessions raises `SESSIONGRAPH_INVALID_REQUEST` rather than
+   * guessing — a search silently answered from the wrong conversation is worse than a refusal. This
+   * is what replaces the built-in `session_event_search`, which needed its own tool for it.
+   */
+  sessionId?: string
+  /**
+   * Return at most one hit per session (the strongest), default `true`.
+   *
+   * The built-in cross-session search answered one hit per session, and a caller paging through a
+   * verbatim log usually wants breadth across conversations, not ten matches from one. Callers that
+   * want every entry (a single-session sweep) turn it off.
+   */
+  dedupeBySession?: boolean
   /** Maximum hits to return. */
   limit: number
   /** Hits to skip, for paging. */
@@ -104,7 +128,13 @@ export interface SessiongraphHit {
 export interface SessiongraphSearchResult {
   operation: 'search'
   hits: SessiongraphHit[]
-  /** Total entries matching the query across the whole store, before `limit`/`offset`. */
+  /**
+   * How many results matched before `limit`/`offset` — counted in the same unit the hits use.
+   *
+   * With `dedupeBySession` on (the default) that is **sessions**, because the hits are one per
+   * session; counting entries there would make `truncated` permanently true and paging incoherent.
+   * With it off, it is entries.
+   */
   total: number
   /** True when `total` exceeded `limit + offset`, or when a snippet was clipped. */
   truncated: boolean
@@ -243,10 +273,129 @@ export interface SessiongraphStatusResult {
   bytes: number
 }
 
+/**
+ * One raw event, reduced to the fields that let a reader orient around a target.
+ *
+ * The window around an event is answered as summaries rather than full payloads: a caller asking
+ * "what came before this" wants the shape of the conversation, not megabytes of tool output.
+ */
+export interface SessiongraphRawEventSummary {
+  /** Event sequence number inside its session. */
+  seq: number
+  /** Event timestamp, epoch milliseconds. */
+  time: number
+  /** Event type as the log records it (`tool/call`, `assistant/message`, …). */
+  type: string
+}
+
+/** One event exactly as the session log holds it, with no clipping applied. */
+export interface SessiongraphRawEvent {
+  /** Event sequence number inside its session. */
+  seq: number
+  /** Event timestamp, epoch milliseconds. */
+  time: number
+  /** Event type as the log records it. */
+  type: string
+  /**
+   * The event's own `data` payload, verbatim. Opaque to this seam on purpose: the log's event
+   * vocabulary belongs to `dsh-session`, and re-declaring it here would drift.
+   */
+  data: unknown
+}
+
+/**
+ * Read one unabridged event, plus an optional window of neighbouring events.
+ *
+ * This is what replaces the built-in `session_event_read`. It reads the source log directly rather
+ * than the index, because the index stores semantic text clipped to a per-entry cap and this answer
+ * must be the original bytes.
+ */
+export interface SessiongraphEventRequest extends SessiongraphRequestBase {
+  operation: 'event'
+  /** Full session id, or a prefix long enough to identify exactly one session. */
+  sessionId: string
+  /** Sequence number of the target event. */
+  seq: number
+  /** Raw events to include immediately before the target. Omitted means none. */
+  windowBefore?: number
+  /** Raw events to include immediately after the target. Omitted means none. */
+  windowAfter?: number
+}
+
+/** Answer to an event request. */
+export interface SessiongraphEventResult {
+  operation: 'event'
+  session: SessiongraphSessionSummary
+  /** The target event, unabridged. */
+  event: SessiongraphRawEvent
+  /** Neighbours before the target, oldest first. */
+  before: SessiongraphRawEventSummary[]
+  /** Neighbours after the target, oldest first. */
+  after: SessiongraphRawEventSummary[]
+}
+
+/** One node of a recursive descendant tree. */
+export interface SessiongraphTraceNode {
+  session: SessiongraphSessionSummary
+  descendants: SessiongraphTraceNode[]
+}
+
+/**
+ * Follow session lineage, or one event's replacement and citation relationships.
+ *
+ * `seq` selects the shape: present means "trace this event", absent means "trace this session".
+ * Both live in one operation because they share the only other input (`sessionId`) and because a
+ * second tool would cost permanent schema tokens for a question asked rarely.
+ */
+export interface SessiongraphTraceRequest extends SessiongraphRequestBase {
+  operation: 'trace'
+  /** Full session id, or a prefix long enough to identify exactly one session. */
+  sessionId: string
+  /** Given → trace one event inside the session; omitted → trace the session's lineage. */
+  seq?: number
+  /** Maximum descendant depth to walk. Omitted means the whole tree. */
+  depth?: number
+}
+
+/** A session's ancestor chain and descendant tree. */
+export interface SessiongraphSessionTraceResult {
+  operation: 'trace'
+  kind: 'session'
+  target: SessiongraphSessionSummary
+  /** Ancestors, nearest first. */
+  ancestors: SessiongraphSessionSummary[]
+  descendants: SessiongraphTraceNode[]
+  /**
+   * False when the walk stopped early — a depth limit was hit, or a parent the index does not hold.
+   * A caller must be able to tell "this is the root" from "I gave up looking".
+   */
+  complete: boolean
+}
+
+/** One event's positional replacements and the source events it cites. */
+export interface SessiongraphEventTraceResult {
+  operation: 'trace'
+  kind: 'event'
+  session: SessiongraphSessionSummary
+  /** The target event, reduced to its identity. */
+  event: SessiongraphRawEventSummary
+  /** Sequence numbers that replaced this event, following the chain outward. */
+  replacedBy: number[]
+  /** Sequence numbers this event shadowed. */
+  shadowedSeqs: number[]
+  /** Sequence numbers this event cites as sources (a tool result citing its call, for instance). */
+  sourceEventSeqs: number[]
+}
+
+/** Either trace shape, discriminated on `kind`. */
+export type SessiongraphTraceResult = SessiongraphSessionTraceResult | SessiongraphEventTraceResult
+
 /** Every request the seam accepts, discriminated on `operation`. */
 export type SessiongraphRequest =
   | SessiongraphSearchRequest
   | SessiongraphSessionRequest
+  | SessiongraphEventRequest
+  | SessiongraphTraceRequest
   | SessiongraphTimelineRequest
   | SessiongraphWorkspacesRequest
   | SessiongraphStatusRequest
@@ -256,18 +405,24 @@ export type SessiongraphResultFor<R extends SessiongraphRequest> = R extends Ses
   ? SessiongraphSearchResult
   : R extends SessiongraphSessionRequest
     ? SessiongraphSessionResult
-    : R extends SessiongraphTimelineRequest
-      ? SessiongraphTimelineResult
-      : R extends SessiongraphWorkspacesRequest
-        ? SessiongraphWorkspacesResult
-        : R extends SessiongraphStatusRequest
-          ? SessiongraphStatusResult
-          : never
+    : R extends SessiongraphEventRequest
+      ? SessiongraphEventResult
+      : R extends SessiongraphTraceRequest
+        ? SessiongraphTraceResult
+        : R extends SessiongraphTimelineRequest
+          ? SessiongraphTimelineResult
+          : R extends SessiongraphWorkspacesRequest
+            ? SessiongraphWorkspacesResult
+            : R extends SessiongraphStatusRequest
+              ? SessiongraphStatusResult
+              : never
 
 /** Every result the seam produces. */
 export type SessiongraphResult =
   | SessiongraphSearchResult
   | SessiongraphSessionResult
+  | SessiongraphEventResult
+  | SessiongraphTraceResult
   | SessiongraphTimelineResult
   | SessiongraphWorkspacesResult
   | SessiongraphStatusResult

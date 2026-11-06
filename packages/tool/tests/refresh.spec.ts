@@ -139,7 +139,7 @@ describe('LazyIndexRefresher', () => {
     expect(calls).toHaveLength(1)
   })
 
-  it('never builds an index from nothing — that belongs to sessiongraph_index', async () => {
+  it('never builds an index from nothing — that belongs to the tool\'s index operation', async () => {
     const calls: SynchronousIndexOptions[] = []
     const outcome = await refresher(async (options) => {
       calls.push(options)

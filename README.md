@@ -78,7 +78,7 @@ Memory does not overlap with either: a conversation may **never enter memory** (
 | `workspaces` | Workspace inventory with session/entry counts |
 | `status` | The index's own state — **the only operation that answers before an index exists** |
 
-`sessiongraph_index`: build or refresh on its own 300-second budget; sessions whose source mtime and size are unchanged are skipped, and past a thousand sessions the run becomes a host background job returning a job id.
+`sessiongraph` (operation `index`): build or refresh inside the shared 30-second tool budget; sessions whose source mtime and size are unchanged are skipped, and past a thousand sessions the run becomes a host background job returning a job id.
 
 ### Commands
 
@@ -101,7 +101,7 @@ Memory does not overlap with either: a conversation may **never enter memory** (
 | **Before a query** | If `status.json`'s `indexedAt` is older than 5 minutes, refresh incrementally first | ~400 ms |
 | **The current session** | Reads the host's `ctx.sessionQuery` and indexes live sessions that have not hit disk yet | negligible |
 
-Prefer to drive it yourself? `autoBuild: false` disables the first automatic build and `autoIndex: false` disables the incremental refreshes; everything then goes through `sessiongraph_index` / `/sessiongraph index`.
+Prefer to drive it yourself? `autoBuild: false` disables the first automatic build and `autoIndex: false` disables the incremental refreshes; everything then goes through `sessiongraph` (operation `index`) / `/sessiongraph index`.
 
 **A run has a deadline.** Each automatic refresh is aborted after `autoIndexTimeoutMs` (fifteen minutes by default) and its index root released, so a run that never settles cannot suppress every later session's refresh.
 
@@ -111,7 +111,7 @@ Prefer to drive it yourself? `autoBuild: false` disables the first automatic bui
 
 ### A nudge for history questions
 
-The system prompt already says to search the index instead of grepping compressed logs. This release adds the moment-of-use reminder: when the last message the user typed reads like a question about past conversations (`上次`, `之前`, `昨天`, `last time`, …) and this conversation has not used either tool yet, the plugin appends one short notice to that model request pointing at `sessiongraph`. Three rules keep it quiet: only a message whose source is the user's own typing can trigger it (injected context, tool results and other plugins' notices are ignored, so the reminder cannot trigger itself); it speaks at most once per conversation; and it never speaks after `sessiongraph` or `sessiongraph_index` has run. `historyHint: false` turns it off.
+The system prompt already says to search the index instead of grepping compressed logs. This release adds the moment-of-use reminder: when the last message the user typed reads like a question about past conversations (`上次`, `之前`, `昨天`, `last time`, …) and this conversation has not used either tool yet, the plugin appends one short notice to that model request pointing at `sessiongraph`. Three rules keep it quiet: only a message whose source is the user's own typing can trigger it (injected context, tool results and other plugins' notices are ignored, so the reminder cannot trigger itself); it speaks at most once per conversation; and it never speaks after `sessiongraph` or `sessiongraph` (operation `index`) has run. `historyHint: false` turns it off.
 
 ### What gets indexed
 
@@ -134,7 +134,7 @@ Or link a local checkout in a profile:
 "dsh": { "profile": { "bundles": [ "...", "dsh-plugin-sessiongraph" ] } }
 ```
 
-Restart DSH afterwards; the first `sessiongraph_index` call builds the database, and everything after that is incremental.
+Restart DSH afterwards; the first `sessiongraph` (operation `index`) call builds the database, and everything after that is incremental.
 
 ## Development
 

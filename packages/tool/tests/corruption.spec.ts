@@ -80,7 +80,7 @@ function harness(failure: unknown, remaining = 1, queries: string[] = []): Map<s
     maxSnippetChars: 600,
     freshnessThresholdMs: 0,
     timeoutMs: 30_000,
-    indexTimeoutMs: 300_000,
+    backgroundIndexThreshold: 1_000,
   }
   apply(ctx as unknown as Context, config)
   return tools

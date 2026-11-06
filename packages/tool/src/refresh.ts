@@ -126,14 +126,15 @@ export class LazyIndexRefresher {
    * A missing sidecar beside an existing index means a run that predates the summary (or one whose
    * summary was lost), and the only way to learn its age is to refresh it — an incremental run is
    * cheap and self-heals the sidecar. A missing index file is different: building from nothing can
-   * take minutes, which the dedicated `sessiongraph_index` tool owns on its own budget, so a query
+   * take minutes, which the tool's explicit `index` operation owns (and hands to a background job
+   * when the index is large enough), so a query
    * leaves it alone and fails with the "no index" guidance instead.
    * @returns true when an incremental run should happen before the query.
    */
   private shouldRefresh(): boolean {
     const { indexRoot, freshnessThresholdMs } = this.deps
     // Without an index file there is nothing to refresh in place. Building one from nothing can take
-    // minutes, and that decision belongs to `sessiongraph_index` on its own budget — a query leaves
+    // minutes, and that decision belongs to the tool's explicit `index` operation — a query leaves
     // it alone and fails with the "no index" guidance instead.
     if (!existsSync(join(indexRoot, INDEX_RELATIVE_PATH))) return false
     const status = readIndexStatus(indexRoot)

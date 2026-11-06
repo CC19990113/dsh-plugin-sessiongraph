@@ -276,7 +276,7 @@ describe('renderSessiongraph status', () => {
     }
     const text = renderSessiongraph({}, status, OPTIONS)
     expect(text).toContain('还没有索引')
-    expect(text).toContain('sessiongraph_index')
+    expect(text).toContain('index 操作')
     expect(text).toContain('/Users/admin/.dsh/sessiongraph/index.db')
   })
 
@@ -357,5 +357,130 @@ describe('renderSessiongraph index', () => {
   it('says nothing failed when nothing did', () => {
     const clean: SessiongraphValueFor<'index'> = { ...report, failed: [] }
     expect(renderSessiongraph({}, clean, OPTIONS)).toContain('没有会话解析失败')
+  })
+})
+
+describe('renderSessiongraph event', () => {
+  const session: SessiongraphValueFor<'event'>['session'] = {
+    session_id: '037ad8fc-29b8-4a69-9a02-e75f9cc8fb45',
+    title: '改广告 SDK',
+    workspace: '/Users/admin/www/dsh-community',
+    created_at: at(10, 3, 10, 0),
+    last_at: at(10, 3, 10, 40),
+    turns: 3,
+    entries: 12,
+  }
+  const event: SessiongraphValueFor<'event'> = {
+    operation: 'event',
+    session,
+    event: {
+      seq: 7,
+      time: at(10, 3, 10, 37),
+      type: 'tool/call',
+      data: { name: 'grep', args: { pattern: '广告' } },
+    },
+    before: [{ seq: 6, time: at(10, 3, 10, 36), type: 'assistant/message' }],
+    after: [],
+  }
+
+  it('names the event and dumps its payload as raw JSON in a fenced block', () => {
+    const text = renderSessiongraph({}, event, OPTIONS)
+    expect(text).toContain('事件 #7')
+    expect(text).toContain('2026-11-03 10:37')
+    expect(text).toContain('tool/call')
+    expect(text).toContain('之前 1 条事件')
+    expect(text).toContain('#6 · 2026-11-03 10:36 · assistant/message')
+    expect(text).toContain('```json')
+    // The payload is the original bytes, never clipped through the snippet cap.
+    expect(text).toContain('"pattern": "广告"')
+  })
+
+  it('omits the neighbour blocks when the window is empty', () => {
+    const alone: SessiongraphValueFor<'event'> = { ...event, before: [] }
+    const text = renderSessiongraph({}, alone, OPTIONS)
+    expect(text).not.toContain('之前')
+    expect(text).not.toContain('之后')
+  })
+})
+
+describe('renderSessiongraph trace', () => {
+  const target: SessiongraphValueFor<'trace'> extends infer T
+    ? T extends { kind: 'session'; target: infer S } ? S : never
+    : never = {
+    session_id: 'target-1',
+    title: '主线',
+    workspace: '/Users/admin/www/dsh-community',
+    created_at: at(10, 3, 9, 0),
+    last_at: at(10, 3, 10, 0),
+    turns: 4,
+    entries: 20,
+  }
+  const child = {
+    session_id: 'child-1',
+    title: '子任务',
+    workspace: '/Users/admin/www/dsh-community',
+    created_at: at(10, 3, 9, 30),
+    last_at: at(10, 3, 9, 40),
+    turns: 1,
+    entries: 5,
+  }
+
+  it('renders the lineage with ancestors and an indented descendant tree', () => {
+    const trace: SessiongraphValueFor<'trace'> = {
+      operation: 'trace',
+      kind: 'session',
+      target,
+      ancestors: [{ ...target, session_id: 'parent-1', title: '父会话' }],
+      descendants: [
+        { session: child, depth: 0 },
+        { session: { ...child, session_id: 'grandchild-1', title: '孙会话' }, depth: 1 },
+      ],
+      complete: false,
+    }
+    const text = renderSessiongraph({}, trace, OPTIONS)
+    expect(text).toContain('会话血缘')
+    expect(text).toContain('祖先 1 个')
+    expect(text).toContain('parent-1')
+    expect(text).toContain('后代 2 个')
+    const lines = text.split('\n')
+    expect(lines.find(line => line.includes('child-1'))?.startsWith('  ')).toBe(true)
+    // Depth is the indent: a grandchild sits one level deeper than its parent.
+    expect(lines.find(line => line.includes('grandchild-1'))?.startsWith('    ')).toBe(true)
+    expect(text).toContain('追踪未完成')
+  })
+
+  it('says the target is the root and has no children when the walk found nothing', () => {
+    const rootOnly: SessiongraphValueFor<'trace'> = {
+      operation: 'trace',
+      kind: 'session',
+      target,
+      ancestors: [],
+      descendants: [],
+      complete: true,
+    }
+    const text = renderSessiongraph({}, rootOnly, OPTIONS)
+    expect(text).toContain('没有父会话')
+    expect(text).toContain('没有子会话')
+    expect(text).not.toContain('追踪未完成')
+  })
+
+  it('lists the three event relationship sets', () => {
+    const trace: SessiongraphValueFor<'trace'> = {
+      operation: 'trace',
+      kind: 'event',
+      session: { ...target, session_id: 'target-1' },
+      event: { seq: 7, time: at(10, 3, 10, 37), type: 'tool/result' },
+      replaced_by: [9, 11],
+      shadowed_seqs: [5],
+      source_event_seqs: [],
+    }
+    const text = renderSessiongraph({}, trace, OPTIONS)
+    expect(text).toContain('事件关系')
+    expect(text).toContain('#7')
+    expect(text).toContain('replacedBy')
+    expect(text).toContain('#9, #11')
+    expect(text).toContain('shadowedSeqs')
+    expect(text).toContain('#5')
+    expect(text).toContain('sourceEventSeqs）：没有引用其它事件')
   })
 })

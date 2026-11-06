@@ -2,6 +2,9 @@
  * SQLite store for `ctx.sessiongraph`. One plugin instance registers one store that answers every
  * seam operation from the on-disk conversation index an indexer writes to
  * `<indexRoot>/index.db`, opening each root read-only and keeping a bounded set of connections warm.
+ * The two exceptions are `event` and `trace`'s event shape: the index holds *semantic text* clipped to
+ * a per-entry cap, while those answers must be the original log line, so they read the session's
+ * source log through `dsh-plugin-sessiongraph-sessions`.
  *
  * The store is host-local by construction: `node:sqlite` opens a path on the machine running the
  * harness, so availability is decided against the host filesystem rather than `ctx.fs`. Availability
@@ -26,12 +29,16 @@ import type {
 } from 'dsh-plugin-sessiongraph-service'
 import type {} from 'dsh-plugin-sessiongraph-service'
 import { IndexPool, indexExists } from './database.ts'
-import { search, session, status, timeline, workspaces } from './queries.ts'
+import { DEFAULT_ENGINE, queryNatively } from './native-query.ts'
+import type { SessiongraphStoreEngine } from './native-query.ts'
+import { event, search, session, status, timeline, trace, workspaces } from './queries.ts'
 
 export { IndexPool, databasePath, indexExists, openIndex } from './database.ts'
-export { toEntry, toHitSubject, toSessionSummary, toWorkspaceStat } from './rows.ts'
+export { DEFAULT_ENGINE, queryNatively } from './native-query.ts'
+export type { SessiongraphStoreEngine } from './native-query.ts'
+export { toEntry, toHitSubject, toRawEvent, toRawEventSummary, toSessionSummary, toWorkspaceStat } from './rows.ts'
 export type { IndexRow } from './rows.ts'
-export { search, session, status, timeline, workspaces } from './queries.ts'
+export { event, search, session, status, timeline, trace, workspaces } from './queries.ts'
 
 /** Cordis plugin name for loader diagnostics. */
 export const name = 'sessiongraph-sqlite'
@@ -72,12 +79,20 @@ export interface Config {
    * configurable so a profile can move the index without rebuilding the plugin.
    */
   defaultIndexRoot?: string
+  /**
+   * Which engine answers index-backed queries (default `auto`). `auto` prefers the native Rust
+   * kernel and silently falls back to the TypeScript queries when this machine has no usable build;
+   * `native` asks for the kernel explicitly, so an unavailable build is reported once before the same
+   * fallback; `typescript` never probes the kernel at all. `status` is always answered locally.
+   */
+  engine?: SessiongraphStoreEngine
 }
 
 export const Config: z<Config> = z.object({
   maxOpenDatabases: z.number().default(DEFAULT_MAX_OPEN_DATABASES),
   maxSnippetChars: z.number().default(DEFAULT_MAX_SNIPPET_CHARS),
   defaultIndexRoot: z.string().default(DEFAULT_INDEX_ROOT),
+  engine: z.union([z.const('auto'), z.const('native'), z.const('typescript')]).default(DEFAULT_ENGINE),
 })
 
 type ResolvedConfig = Required<Config>
@@ -107,7 +122,7 @@ export function apply(ctx: Context, config: Config): void {
     },
     query<R extends SessiongraphRequest>(request: R, signal?: AbortSignal): Promise<SessiongraphResultFor<R>> {
       signal?.throwIfAborted()
-      return Promise.resolve(run(pool, resolved, request))
+      return run(pool, resolved, request)
     },
   }
 
@@ -138,11 +153,11 @@ function resolveIndexRoot(config: ResolvedConfig, indexRoot: string): string {
  * @param request - the normalized seam request.
  * @returns the result member matching `request.operation`.
  */
-function run<R extends SessiongraphRequest>(
+async function run<R extends SessiongraphRequest>(
   pool: IndexPool,
   config: ResolvedConfig,
   request: R,
-): SessiongraphResultFor<R> {
+): Promise<SessiongraphResultFor<R>> {
   const indexRoot = resolveIndexRoot(config, request.indexRoot)
   // `status` is the one operation that answers without an index, so it must not acquire a
   // connection up front. `ctx.sessiongraph` routes only to a store that claimed the root, but a
@@ -150,12 +165,21 @@ function run<R extends SessiongraphRequest>(
   if (request.operation === 'status') {
     return status(pool, indexRoot) as SessiongraphResultFor<R>
   }
+  // The kernel is asked first and owns its own error handling: every native failure (no build, an
+  // older build, a throwing call) resolves to `undefined` here, which is this store's signal to
+  // answer from SQLite instead. `indexRoot` is already resolved, so both engines see the same file.
+  const native = await queryNatively(config.engine, request, indexRoot, config.maxSnippetChars)
+  if (native !== undefined) return native as SessiongraphResultFor<R>
   const db = pool.acquire(indexRoot)
   switch (request.operation) {
     case 'search':
       return search(db, request, config.maxSnippetChars) as SessiongraphResultFor<R>
     case 'session':
       return session(db, request) as SessiongraphResultFor<R>
+    case 'event':
+      return event(db, request) as SessiongraphResultFor<R>
+    case 'trace':
+      return trace(db, request) as SessiongraphResultFor<R>
     case 'timeline':
       return timeline(db, request) as SessiongraphResultFor<R>
     case 'workspaces':

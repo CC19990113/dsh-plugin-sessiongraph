@@ -1,0 +1,55 @@
+{
+  "name": "dsh-plugin-sessiongraph-panel",
+  "version": "0.1.21",
+  "description": "Settings-page panel for dsh-plugin-sessiongraph: a 会话检索 tab that switches which session-reading tools the model can see (sessiongraph / kernel / both). Browser half only — every value comes from the host's /dsh-plugin-sessiongraph/api/* routes.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "sessiongraph",
+    "session-history",
+    "settings",
+    "panel",
+    "web-ui"
+  ],
+  "license": "MIT",
+  "author": "CC ZHAO",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CC19990113/dsh-plugin-sessiongraph.git",
+    "directory": "packages/panel"
+  },
+  "homepage": "https://github.com/CC19990113/dsh-plugin-sessiongraph#readme",
+  "bugs": "https://github.com/CC19990113/dsh-plugin-sessiongraph/issues",
+  "type": "module",
+  "main": "lib/host.js",
+  "exports": {
+    ".": {
+      "default": "./lib/host.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js"
+  ],
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": false
+  },
+  "dsh": {
+    "client": {
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  }
+}

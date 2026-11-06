@@ -1,7 +1,8 @@
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
-import { Sessiongraph, SessiongraphError, SessiongraphIndexerId, SessiongraphStoreId } from '../src/index.ts'
+import { Sessiongraph, SessiongraphError, SessiongraphIndexerId, SessiongraphSessionId, SessiongraphStoreId } from '../src/index.ts'
 import type {
+  SessiongraphEventResult,
   SessiongraphIndexOptions,
   SessiongraphIndexReport,
   SessiongraphIndexer,
@@ -9,6 +10,7 @@ import type {
   SessiongraphResultFor,
   SessiongraphStatusResult,
   SessiongraphStoreProvider,
+  SessiongraphTraceResult,
 } from '../src/index.ts'
 
 const ROOT = '/tmp/sessiongraph-registry-test'
@@ -130,5 +132,98 @@ describe('routing', () => {
   it('fails an index run when no indexer claims the root', async () => {
     const { sessiongraph } = await service()
     await expect(sessiongraph.index(ROOT)).rejects.toMatchObject({ code: 'SESSIONGRAPH_UNAVAILABLE' })
+  })
+})
+
+/**
+ * `event` and `trace` arrived when the model-facing surface collapsed into one tool, and their
+ * answers are discriminated unions — a `trace` of a session and a `trace` of an event share an
+ * operation name but nothing else. These tests pin the seam's half of that contract: the request
+ * reaches the store untouched, and whatever shape the store returns is what the caller sees.
+ */
+describe('event and trace routing', () => {
+  /** A store that records every request and answers with the shape that request asks for. */
+  function recordingStore(seen: SessiongraphRequest[]): SessiongraphStoreProvider {
+    const summary = {
+      sessionId: SessiongraphSessionId('session-1'),
+      title: undefined,
+      workspace: '/w',
+      createdAt: 1,
+      lastAt: 2,
+      turns: 1,
+      entries: 1,
+      parentSession: undefined,
+      origin: undefined,
+      agentPreset: undefined,
+    }
+    return {
+      id: SessiongraphStoreId('recorder'),
+      indexes: async (indexRoot: string) => indexRoot === ROOT,
+      query: async <R extends SessiongraphRequest>(request: R): Promise<SessiongraphResultFor<R>> => {
+        seen.push(request)
+        const answer = ((): unknown => {
+          if (request.operation === 'event') {
+            return {
+              operation: 'event',
+              session: summary,
+              event: { seq: request.seq, time: 9, type: 'tool/call', data: { name: 'bash' } },
+              before: [],
+              after: [],
+            }
+          }
+          if (request.operation === 'trace') {
+            return request.seq === undefined
+              ? { operation: 'trace', kind: 'session', target: summary, ancestors: [], descendants: [], complete: true }
+              : {
+                  operation: 'trace',
+                  kind: 'event',
+                  session: summary,
+                  event: { seq: request.seq, time: 9, type: 'tool/result' },
+                  replacedBy: [],
+                  shadowedSeqs: [],
+                  sourceEventSeqs: [request.seq - 1],
+                }
+          }
+          return {
+            operation: 'status',
+            indexed: true,
+            indexPath: request.indexRoot,
+            sessions: 1,
+            entries: 1,
+            workspaces: 1,
+            indexedAt: 1,
+            bytes: 1,
+          }
+        })()
+        return answer as SessiongraphResultFor<R>
+      },
+    }
+  }
+
+  it('forwards an event request to the store with its window intact', async () => {
+    const { sessiongraph } = await service()
+    const seen: SessiongraphRequest[] = []
+    sessiongraph.registerStore(recordingStore(seen))
+    const result = (await sessiongraph.query({
+      operation: 'event',
+      indexRoot: ROOT,
+      sessionId: 'session-1',
+      seq: 7,
+      windowBefore: 2,
+      windowAfter: 1,
+    })) as SessiongraphEventResult
+    expect(seen[0]).toMatchObject({ operation: 'event', seq: 7, windowBefore: 2, windowAfter: 1 })
+    expect(result.event.seq).toBe(7)
+    expect(result.event.data).toEqual({ name: 'bash' })
+  })
+
+  it('discriminates a session trace from an event trace by the presence of seq', async () => {
+    const { sessiongraph } = await service()
+    sessiongraph.registerStore(recordingStore([]))
+    const lineage = (await sessiongraph.query({ operation: 'trace', indexRoot: ROOT, sessionId: 'session-1' })) as SessiongraphTraceResult
+    expect(lineage.kind).toBe('session')
+    const relation = (await sessiongraph.query({ operation: 'trace', indexRoot: ROOT, sessionId: 'session-1', seq: 7 })) as SessiongraphTraceResult
+    expect(relation.kind).toBe('event')
+    if (relation.kind === 'event') expect(relation.sourceEventSeqs).toEqual([6])
   })
 })

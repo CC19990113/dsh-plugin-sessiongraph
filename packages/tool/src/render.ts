@@ -10,7 +10,7 @@
  */
 
 import { assertNever } from 'dsh-plugin-sessiongraph-service'
-import type { SessiongraphToolValue } from './schema.ts'
+import type { SessiongraphToolValue, SessiongraphValueFor } from './schema.ts'
 
 /**
  * The arguments rendering may look at: the few model-supplied facts the canonical value does not echo
@@ -129,6 +129,50 @@ function titled(title: string | undefined): string {
   return title === undefined || title.trim() === '' ? '（无标题）' : `《${title}》`
 }
 
+/** One session as a single line: when it last spoke, its id, title, workspace, and size. */
+function sessionLine(session: SessiongraphValueFor<'session'>['session']): string {
+  return `${formatTime(session.last_at)} · session ${session.session_id} · ${titled(session.title)}`
+    + ` · ${session.workspace} · ${session.turns} 轮 / ${session.entries} 条`
+}
+
+/** One event summary as a single line. */
+function eventLine(event: { readonly seq: number; readonly time: number; readonly type: string }): string {
+  return `#${event.seq} · ${formatTime(event.time)} · ${event.type}`
+}
+
+/** Render a JSON value for a fenced block, never returning `undefined`. */
+function jsonText(value: unknown): string {
+  const text = JSON.stringify(value, null, 2)
+  return text === undefined ? 'null' : text
+}
+
+/**
+ * Render one event-trace answer: the event's identity, then the three relationship sets.
+ * @param value - the canonical `trace` value of `kind: 'event'`.
+ * @returns the rendered text.
+ */
+function eventTraceText(value: Extract<SessiongraphValueFor<'trace'>, { kind: 'event' }>): string {
+  const session = value.session
+  return [
+    `事件关系：会话 ${session.session_id} · ${titled(session.title)}`,
+    `${session.workspace} · ${eventLine(value.event)}`,
+    sequenceLine('被这些事件替换（replacedBy）', value.replaced_by, '没有被替换。'),
+    sequenceLine('它替换了（shadowedSeqs）', value.shadowed_seqs, '没有替换任何事件。'),
+    sequenceLine('引用来源（sourceEventSeqs）', value.source_event_seqs, '没有引用其它事件。'),
+  ].join('\n')
+}
+
+/**
+ * Render one labelled list of event sequence numbers.
+ * @param label - the relationship's name.
+ * @param seqs - the sequence numbers.
+ * @param empty - what to say instead when there are none.
+ * @returns one line.
+ */
+function sequenceLine(label: string, seqs: readonly number[], empty: string): string {
+  return seqs.length === 0 ? `${label}：${empty}` : `${label}：${seqs.map(seq => `#${seq}`).join(', ')}`
+}
+
 /** One hit as the three lines a reader needs: when/who, where, and the matched text. */
 function hitLines(hit: Extract<SessiongraphToolValue, { operation: 'search' }>['hits'][number], maxChars: number): string[] {
   const turn = hit.turn === undefined ? '' : ` · 第 ${hit.turn} 轮`
@@ -142,7 +186,7 @@ function hitLines(hit: Extract<SessiongraphToolValue, { operation: 'search' }>['
 /** The one line an answer carries when the index could not be brought up to date before querying. */
 export const STALE_NOTE =
   '（注意：本次增量刷新没有完成，答案可能不是最新——索引里可能还没有刚才的对话。'
-  + '确实需要最新结果时可以调用 sessiongraph_index 强制刷新。）'
+  + '确实需要最新结果时可以调用 sessiongraph 的 index 操作（force: true）强制重建。）'
 
 /** Whether a value was served from an index the query path could not refresh first. */
 function isStale(value: SessiongraphToolValue): boolean {
@@ -221,6 +265,53 @@ function renderValue(
       }
       return lines.join('\n')
     }
+    case 'event': {
+      const session = value.session
+      const lines = [
+        `会话 ${session.session_id} · ${titled(session.title)}`,
+        `${session.workspace} · 事件 #${value.event.seq} · ${formatTime(value.event.time)} · ${value.event.type}`,
+      ]
+      if (value.before.length > 0) {
+        lines.push(`之前 ${value.before.length} 条事件（旧→新）：`)
+        for (const summary of value.before) lines.push(`  ${eventLine(summary)}`)
+      }
+      // The payload is the original bytes: an event read exists so the model can see what the index
+      // clipped, so it goes into a fenced JSON block verbatim rather than through `clipText`.
+      lines.push('```json')
+      lines.push(jsonText(value.event.data))
+      lines.push('```')
+      if (value.after.length > 0) {
+        lines.push(`之后 ${value.after.length} 条事件（旧→新）：`)
+        for (const summary of value.after) lines.push(`  ${eventLine(summary)}`)
+      }
+      return lines.join('\n')
+    }
+    case 'trace': {
+      if (value.kind === 'event') {
+        return eventTraceText(value)
+      }
+      const target = value.target
+      const lines = [
+        `会话血缘：${titled(target.title)} · session ${target.session_id}`,
+        `${target.workspace} · ${formatTime(target.created_at)} → ${formatTime(target.last_at)}`
+          + ` · ${target.turns} 轮 · ${target.entries} 条`,
+      ]
+      if (value.ancestors.length === 0) {
+        lines.push('没有父会话（这条血缘的根）。')
+      } else {
+        lines.push(`祖先 ${value.ancestors.length} 个（近→远）：`)
+        for (const ancestor of value.ancestors) lines.push(`  ${sessionLine(ancestor)}`)
+      }
+      if (value.descendants.length === 0) {
+        lines.push('没有子会话。')
+      } else {
+        lines.push(`后代 ${value.descendants.length} 个：`)
+        // `depth` is the distance from the target, so the indent is the tree shape itself.
+        for (const node of value.descendants) lines.push(`${'  '.repeat(node.depth + 1)}${sessionLine(node.session)}`)
+      }
+      if (!value.complete) lines.push('（追踪未完成：命中 depth 上限，或父会话不在索引里。）')
+      return lines.join('\n')
+    }
     case 'timeline': {
       if (value.sessions.length === 0) {
         return args.workspace === undefined ? '索引里还没有会话。' : `工作区 ${args.workspace} 还没有被索引的会话。`
@@ -249,7 +340,7 @@ function renderValue(
     }
     case 'status': {
       if (!value.indexed) {
-        return `还没有索引（${value.index_path}）。请先调用 sessiongraph_index 建一次索引；建好之前除 status 外的查询都会失败。`
+        return `还没有索引（${value.index_path}）。请先调用 sessiongraph 的 index 操作建一次；建好之前除 status 外的操作都会失败。`
       }
       const indexedAt = value.indexed_at === undefined ? '未知' : formatTime(value.indexed_at)
       return `索引就绪（${value.index_path}）：${value.sessions} 个会话、${value.entries} 条可检索条目、`

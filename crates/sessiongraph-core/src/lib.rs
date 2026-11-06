@@ -24,6 +24,7 @@ use rayon::prelude::*;
 
 pub mod decode;
 pub mod parse;
+pub mod query;
 pub mod scan;
 pub mod tokenize;
 pub mod write;
@@ -143,6 +144,17 @@ impl Task for IndexTask {
 #[napi]
 pub fn index_sessions(options: IndexOptions) -> AsyncTask<IndexTask> {
     AsyncTask::new(IndexTask { options })
+}
+
+/// Answer one query, off the JavaScript thread.
+///
+/// The answer carries a complete result JSON string rather than a per-field napi object: a raw event
+/// can be tens of kilobytes, and one `JSON.parse` on the JS side is cheaper than converting every
+/// field across the boundary. Errors are carried in the response (`ok: false` + code + message)
+/// rather than thrown, so the JS wrapper can fall back to the TypeScript store on any failure.
+#[napi]
+pub fn query(request: query::QueryRequest) -> AsyncTask<query::QueryTask> {
+    AsyncTask::new(query::QueryTask::new(request))
 }
 
 /// Options after defaults and path resolution.

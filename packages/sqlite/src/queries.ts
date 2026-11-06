@@ -1,7 +1,12 @@
 /**
- * The five seam operations against one open index database. Every function here is synchronous:
+ * The seven seam operations against one open index database. Every function here is synchronous:
  * `node:sqlite` is a synchronous binding, so a query either completes within one turn or throws, and
  * the store's async surface exists for the seam's contract rather than for I/O interleaving.
+ *
+ * `event` and `trace` are the two operations that leave the index and read a session's source log:
+ * the index stores *semantic text*, clipped to a per-entry cap and only for the entry kinds a search
+ * can match, while an event read must return the original log line — including the events the index
+ * never stores. Everything else here answers from `index.db` alone.
  *
  * User-supplied strings never reach a statement as SQL text. Every filter is a `?` binding; the only
  * text shaped from input is a `LIKE` pattern, and its wildcard characters are escaped so a workspace
@@ -20,22 +25,40 @@ import {
 } from 'dsh-plugin-sessiongraph-service'
 import type {
   SessiongraphEntry,
+  SessiongraphEntryKind,
+  SessiongraphEventRequest,
+  SessiongraphEventResult,
+  SessiongraphEventTraceResult,
   SessiongraphHit,
   SessiongraphSearchRequest,
   SessiongraphSearchResult,
   SessiongraphSessionRequest,
   SessiongraphSessionResult,
+  SessiongraphSessionSummary,
+  SessiongraphSessionTraceResult,
   SessiongraphStatusResult,
   SessiongraphTimelineRequest,
   SessiongraphTimelineResult,
+  SessiongraphTraceNode,
+  SessiongraphTraceRequest,
+  SessiongraphTraceResult,
   SessiongraphWorkspaceStat,
   SessiongraphWorkspacesRequest,
   SessiongraphWorkspacesResult,
 } from 'dsh-plugin-sessiongraph-service'
+import { isLiveSource, rawEventWindow, readRawEvents, traceRawEvent } from 'dsh-plugin-sessiongraph-sessions'
+import type { RawSessionLog } from 'dsh-plugin-sessiongraph-sessions'
 import { databasePath } from './database.ts'
 import type { IndexPool } from './database.ts'
 import type { IndexRow } from './rows.ts'
-import { toEntry, toHitSubject, toSessionSummary, toWorkspaceStat } from './rows.ts'
+import {
+  toEntry,
+  toHitSubject,
+  toRawEvent,
+  toRawEventSummary,
+  toSessionSummary,
+  toWorkspaceStat,
+} from './rows.ts'
 
 /** Every `session` column the summary projection reads. */
 const SESSION_COLUMNS = [
@@ -55,12 +78,80 @@ const SESSION_COLUMNS = [
 const ENTRY_COLUMNS = 'seq, time, kind, turn, text, clipped'
 
 /**
+ * The same projection, qualified with the `s` alias. A lineage CTE also carries `id`/`parent_session`,
+ * so an unqualified projection would be ambiguous there.
+ */
+const SESSION_COLUMNS_S = [
+  'id',
+  'workspace',
+  'title',
+  'created_at',
+  'last_at',
+  'parent_session',
+  'origin',
+  'agent_preset',
+  'turns',
+  'entries',
+]
+  .map(column => `s.${column} AS ${column}`)
+  .join(', ')
+
+/**
  * `source_path` prefix the indexer writes for a conversation that is still running, before its log
- * exists on disk. Spelled out here instead of imported from the indexer package: a store depends only
- * on the seam, and this is a value shared through the on-disk format, not through code. A session
- * ends and is re-indexed from a real path, at which point its row no longer matches.
+ * exists on disk. Spelled out here as a predicate instead of imported: it is a value shared through
+ * the on-disk format, not through code. A session ends and is re-indexed from a real path, at which
+ * point its row no longer matches.
  */
 const LIVE_SOURCE_LIKE = 'live://%'
+
+/**
+ * Ranking weight per entry kind, **divided** into the FTS5 `bm25` score.
+ *
+ * FTS5's `bm25` is negative and *more* negative means a better match, so the weight is a penalty: a
+ * larger weight pushes that kind further down the list. Dividing — never multiplying — is the whole
+ * point. `bm25 * 1.5` would make a `tool` hit *better*, which is the opposite of what this table
+ * means: on a real index it turned every top-20 result for 广告 into a tool call. With `bm25 / 1.5`
+ * the order is the one the table reads as: a human's message (`user`, 1.0) outranks everything, a
+ * title slightly less, a reply less again, and a tool invocation last.
+ *
+ * The table is deliberately shared vocabulary with the native kernel. Both engines must rank one
+ * query the same way, or a machine that has the Rust build would answer differently from one that
+ * does not — the kernel's task carries the same numbers and the same division.
+ */
+const KIND_WEIGHTS: Readonly<Record<SessiongraphEntryKind, number>> = {
+  user: 1.0,
+  title: 1.1,
+  assistant: 1.2,
+  tool: 1.5,
+}
+
+/** The one `entry` projection a search hit needs, shared by the deduped and plain queries. */
+const HIT_COLUMNS = `e.session_id AS session_id, s.title AS title, s.workspace AS workspace,
+       e.time AS time, e.kind AS kind, e.seq AS seq, e.turn AS turn, e.text AS text`
+
+/**
+ * Ceiling on one session-lineage walk, in levels.
+ *
+ * `depth` is caller-controlled and the log is not trusted to be acyclic, so the recursive CTE needs a
+ * bound of its own. 64 is far beyond any real delegation tree (the harness nests a handful of
+ * levels); the number exists to terminate, not to limit.
+ */
+const MAX_LINEAGE_DEPTH = 64
+
+/**
+ * Render the kind-penalty `CASE` for one column.
+ *
+ * The kinds and weights come from {@link KIND_WEIGHTS}, a closed compile-time table, so this is not
+ * user input reaching a statement — no caller string can appear here.
+ * @param column - the already-trusted SQL column holding an entry kind.
+ * @returns a `CASE` expression yielding that kind's weight, to divide a negative `bm25` by.
+ */
+function weightExpression(column: string): string {
+  const arms = Object.entries(KIND_WEIGHTS)
+    .map(([kind, weight]) => `WHEN '${kind}' THEN ${weight.toFixed(1)}`)
+    .join(' ')
+  return `CASE ${column} ${arms} ELSE 1.0 END`
+}
 
 /** Run a statement and return its rows already typed as raw records. */
 function rows(db: DatabaseSync, sql: string, params: readonly unknown[] = []): IndexRow[] {
@@ -223,14 +314,18 @@ function renderSnippet(
 /**
  * Full-text search across indexed history.
  *
- * Ordering is `bm25`, then newest, then entry id. `bm25` is chosen over plain recency because a
- * search result list is read top-down and the caller wants the best match first, not merely the most
- * recent one. Ranking alone is NOT a total order: equally scored rows (extremely common for short
- * entries and bigram queries) come back in whatever order the scan produced, which would make
- * `LIMIT`/`OFFSET` paging skip and duplicate rows between pages. Appending `e.time DESC, e.id ASC`
- * supplies a deterministic total order without displacing relevance, since `entry.id` is unique and
- * UNIQUE breaks every remaining tie. That is also why this is the one operation whose page order is
- * stable across requests against an unchanged index.
+ * Ordering is the kind-penalized `bm25` score (`bm25 / weight`), then newest, then entry id. `bm25` is chosen over plain
+ * recency because a search result list is read top-down and the caller wants the best match first,
+ * not merely the most recent one. Ranking alone is NOT a total order: equally scored rows (extremely
+ * common for short entries and bigram queries) come back in whatever order the scan produced, which
+ * would make `LIMIT`/`OFFSET` paging skip and duplicate rows between pages. Appending
+ * `time DESC, entry_id ASC` supplies a deterministic total order without displacing relevance, since
+ * `entry.id` is unique and breaks every remaining tie.
+ *
+ * `dedupeBySession` (default true) keeps the single strongest entry per session, which is the shape
+ * of the question "which conversation did I talk about this in". When it is on, `total` counts the
+ * sessions that matched rather than the entries: a total counted over a set the page cannot page
+ * through would make `truncated` permanently true and paging incoherent.
  * @param db - the open index connection.
  * @param request - the search query.
  * @param maxSnippetChars - largest excerpt the plugin will render per hit.
@@ -253,6 +348,12 @@ export function search(
 
   const filters = ['entry_fts MATCH ?']
   const params: unknown[] = [match]
+  if (request.sessionId !== undefined) {
+    // Resolving here (rather than trusting the caller's string) is what turns a prefix into the one
+    // session it names, and what refuses a prefix that names several.
+    filters.push('e.session_id = ?')
+    params.push(resolveSearchedSession(db, request.sessionId))
+  }
   if (request.kinds !== undefined) {
     filters.push(`e.kind IN (${request.kinds.map(() => '?').join(', ')})`)
     params.push(...request.kinds)
@@ -274,7 +375,10 @@ export function search(
     JOIN entry e ON e.id = entry_fts.rowid
     JOIN session s ON s.id = e.session_id
     WHERE ${filters.join(' AND ')}`
-  const total = count(db, `SELECT count(*) AS total ${from}`, params)
+  const dedupe = request.dedupeBySession !== false
+  const total = dedupe
+    ? count(db, `SELECT count(DISTINCT e.session_id) AS total ${from}`, params)
+    : count(db, `SELECT count(*) AS total ${from}`, params)
   const limit = bound(request.limit)
   const offset = bound(request.offset)
   if (limit === 0) {
@@ -282,11 +386,7 @@ export function search(
   }
   const found = rows(
     db,
-    `SELECT e.session_id AS session_id, s.title AS title, s.workspace AS workspace,
-            e.time AS time, e.kind AS kind, e.seq AS seq, e.turn AS turn, e.text AS text
-       ${from}
-      ORDER BY bm25(entry_fts), e.time DESC, e.id ASC
-      LIMIT ? OFFSET ?`,
+    `${dedupe ? dedupedPageSql(from) : plainPageSql(from)} LIMIT ? OFFSET ?`,
     [...params, limit, offset],
   )
   const terms = highlightTerms(request.query)
@@ -301,6 +401,41 @@ export function search(
     return { ...toHitSubject(row), snippet: rendered.snippet, length: value.length }
   })
   return { operation: 'search', hits, total, truncated: total > offset + hits.length || clipped }
+}
+
+/**
+ * One page of hits, one per session: the strongest match inside each session, ranked across sessions.
+ *
+ * The window function runs in its own CTE because the outer statement has to filter on its result
+ * (`session_rank = 1`) before ordering; SQLite will not accept a window function in `WHERE`.
+ * @param from - the shared `FROM … WHERE …` tail of the search.
+ * @returns the statement up to, but not including, `LIMIT`.
+ */
+function dedupedPageSql(from: string): string {
+  return `WITH matched AS (
+    SELECT ${HIT_COLUMNS}, e.id AS entry_id, bm25(entry_fts) AS score
+    ${from}
+  ), ranked AS (
+    SELECT *, ROW_NUMBER() OVER (
+      PARTITION BY session_id ORDER BY score, time DESC, entry_id
+    ) AS session_rank
+      FROM matched
+  )
+  SELECT session_id, title, workspace, time, kind, seq, turn, text
+    FROM ranked
+   WHERE session_rank = 1
+   ORDER BY score / ${weightExpression('kind')}, time DESC, seq ASC, entry_id ASC`
+}
+
+/**
+ * One page of hits, every matching entry eligible. The un-deduped shape, for a single-session sweep.
+ * @param from - the shared `FROM … WHERE …` tail of the search.
+ * @returns the statement up to, but not including, `LIMIT`.
+ */
+function plainPageSql(from: string): string {
+  return `SELECT ${HIT_COLUMNS}
+    ${from}
+   ORDER BY bm25(entry_fts) / ${weightExpression('e.kind')}, e.time DESC, e.id ASC`
 }
 
 /** Read a `session.id` column, refusing anything that is not text. */
@@ -349,6 +484,56 @@ function resolveSessionId(db: DatabaseSync, wanted: string): SessiongraphSession
 }
 
 /**
+ * Resolve the session a search is restricted to.
+ *
+ * Same resolution as {@link resolveSessionId}, with one deliberate difference: a prefix naming several
+ * sessions is a **bad request**, not a miss. A search silently answered from the wrong conversation is
+ * worse than a refusal, and the caller's remedy is to narrow the reference — which the error says.
+ * @param db - the open index connection.
+ * @param wanted - the requested id or prefix.
+ * @returns the one session id it names.
+ */
+function resolveSearchedSession(db: DatabaseSync, wanted: string): SessiongraphSessionId {
+  const reference = wanted.trim()
+  if (reference === '') {
+    throw new SessiongraphError('a session id filter must be a non-empty string', 'SESSIONGRAPH_INVALID_REQUEST')
+  }
+  const exact = rows(db, 'SELECT id FROM session WHERE id = ?', [reference])[0]
+  if (exact !== undefined) return sessionIdOf(exact)
+  const candidates = rows(
+    db,
+    `SELECT id FROM session WHERE id LIKE ? ESCAPE '\\' ORDER BY last_at DESC, id ASC LIMIT 8`,
+    [`${escapeLike(reference)}%`],
+  )
+  const [only] = candidates
+  if (only === undefined) {
+    throw new SessiongraphError(`no indexed session matches "${reference}"`, 'SESSIONGRAPH_NOT_FOUND')
+  }
+  if (candidates.length === 1) return sessionIdOf(only)
+  const listing = candidates.map(row => sessionIdOf(row)).join(', ')
+  throw new SessiongraphError(
+    `session id filter "${reference}" is ambiguous; it matches several sessions: ${listing}`,
+    'SESSIONGRAPH_INVALID_REQUEST',
+  )
+}
+
+/**
+ * Read one session's full summary projection.
+ * @param db - the open index connection.
+ * @param id - the resolved session id.
+ * @returns the raw `session` row.
+ */
+function sessionSummaryRow(db: DatabaseSync, id: SessiongraphSessionId): IndexRow {
+  const row = rows(db, `SELECT ${SESSION_COLUMNS} FROM session WHERE id = ?`, [id])[0]
+  if (row === undefined) {
+    // Unreachable unless the index is being rewritten between two statements; report it as a miss
+    // rather than fabricating a summary.
+    throw new SessiongraphError(`no indexed session matches "${id}"`, 'SESSIONGRAPH_NOT_FOUND')
+  }
+  return row
+}
+
+/**
  * Read one session's metadata, a page of its entries in the session's own chronological order, and
  * the sessions delegated from it.
  * @param db - the open index connection.
@@ -357,13 +542,7 @@ function resolveSessionId(db: DatabaseSync, wanted: string): SessiongraphSession
  */
 export function session(db: DatabaseSync, request: SessiongraphSessionRequest): SessiongraphSessionResult {
   const id = resolveSessionId(db, request.sessionId)
-  const summaryRow = rows(db, `SELECT ${SESSION_COLUMNS} FROM session WHERE id = ?`, [id])[0]
-  if (summaryRow === undefined) {
-    // Unreachable unless the index is being rewritten between two statements; report it as a miss
-    // rather than fabricating a summary.
-    throw new SessiongraphError(`no indexed session matches "${request.sessionId}"`, 'SESSIONGRAPH_NOT_FOUND')
-  }
-  const summary = toSessionSummary(summaryRow)
+  const summary = toSessionSummary(sessionSummaryRow(db, id))
   const limit = bound(request.limit)
   const offset = bound(request.offset)
   const total = count(db, 'SELECT count(*) AS total FROM entry WHERE session_id = ?', [id])
@@ -387,6 +566,245 @@ export function session(db: DatabaseSync, request: SessiongraphSessionRequest): 
     children,
     truncated: total > offset + entries.length,
   }
+}
+
+/**
+ * Read one event's original log line, plus a window of its neighbours.
+ *
+ * The index cannot answer this: it stores semantic text, clipped, and only for four entry kinds. So
+ * this is the one query that reads a source log directly, and it is the only place the store performs
+ * I/O beyond `index.db`.
+ * @param db - the open index connection.
+ * @param request - the event query.
+ * @returns the session summary, the unabridged target event, and its neighbours.
+ */
+export function event(db: DatabaseSync, request: SessiongraphEventRequest): SessiongraphEventResult {
+  const id = resolveSessionId(db, request.sessionId)
+  const summary = toSessionSummary(sessionSummaryRow(db, id))
+  const log = readRawLog(db, id)
+  const window = rawEventWindow(log, request.seq, bound(request.windowBefore), bound(request.windowAfter))
+  if (window === undefined) {
+    throw new SessiongraphError(`session "${id}" has no event at seq ${request.seq}`, 'SESSIONGRAPH_NOT_FOUND')
+  }
+  return {
+    operation: 'event',
+    session: summary,
+    event: toRawEvent(window.event),
+    before: window.before.map(toRawEventSummary),
+    after: window.after.map(toRawEventSummary),
+  }
+}
+
+/**
+ * Follow a session's lineage, or one event's replacement and citation relationships.
+ *
+ * `seq` selects the shape — present traces one event inside the session, absent traces the session
+ * itself — because both ask the same question of the same input and a second operation would cost
+ * permanent schema tokens for a question asked rarely.
+ * @param db - the open index connection.
+ * @param request - the trace query.
+ * @returns the session lineage or the event relationship graph.
+ */
+export function trace(db: DatabaseSync, request: SessiongraphTraceRequest): SessiongraphTraceResult {
+  const id = resolveSessionId(db, request.sessionId)
+  if (request.seq !== undefined) return traceEvent(db, id, request.seq)
+  return traceSessionChain(db, id, request.depth)
+}
+
+/**
+ * Trace one event: which surface events replaced it, which it replaced, and what it cites.
+ * @param db - the open index connection.
+ * @param id - the resolved session id.
+ * @param seq - the target event's sequence number.
+ * @returns the event trace.
+ */
+function traceEvent(
+  db: DatabaseSync,
+  id: SessiongraphSessionId,
+  seq: number,
+): SessiongraphEventTraceResult {
+  const summary = toSessionSummary(sessionSummaryRow(db, id))
+  const log = readRawLog(db, id)
+  const traced = traceRawEvent(log, seq)
+  if (traced === undefined) {
+    throw new SessiongraphError(`session "${id}" has no event at seq ${seq}`, 'SESSIONGRAPH_NOT_FOUND')
+  }
+  return {
+    operation: 'trace',
+    kind: 'event',
+    session: summary,
+    event: toRawEventSummary(traced.event),
+    replacedBy: [...traced.replacedBy],
+    shadowedSeqs: [...traced.shadowedSeqs],
+    sourceEventSeqs: [...traced.sourceEventSeqs],
+  }
+}
+
+/**
+ * Trace one session: its ancestor chain and its descendant tree.
+ *
+ * Two recursive CTEs over `parent_session`, one upward and one downward. `complete` is the answer the
+ * caller actually needs: a session whose parent is not indexed and a session whose delegation tree was
+ * cut by `depth` both produce a shorter tree than reality, and "this is the root" must not be
+ * confused with "the walk gave up".
+ * @param db - the open index connection.
+ * @param id - the resolved session id.
+ * @param requestedDepth - maximum descendant depth, or undefined for the whole tree.
+ * @returns the target, its ancestors nearest first, its descendant tree, and whether the walk was
+ * complete.
+ */
+function traceSessionChain(
+  db: DatabaseSync,
+  id: SessiongraphSessionId,
+  requestedDepth: number | undefined,
+): SessiongraphSessionTraceResult {
+  const target = toSessionSummary(sessionSummaryRow(db, id))
+  const depth = requestedDepth === undefined ? MAX_LINEAGE_DEPTH : Math.min(bound(requestedDepth), MAX_LINEAGE_DEPTH)
+
+  const ancestorRows = rows(
+    db,
+    `WITH RECURSIVE ancestry(id, parent_session, depth) AS (
+       SELECT id, parent_session, 0 FROM session WHERE id = ?
+       UNION ALL
+       SELECT s.id, s.parent_session, a.depth + 1
+         FROM session s JOIN ancestry a ON s.id = a.parent_session
+        WHERE a.depth < ?
+     )
+     SELECT ${SESSION_COLUMNS_S}, a.depth AS depth
+       FROM session s JOIN ancestry a ON a.id = s.id
+      WHERE a.depth > 0
+      ORDER BY a.depth ASC`,
+    [id, MAX_LINEAGE_DEPTH],
+  )
+  const ancestors: SessiongraphSessionSummary[] = []
+  const seenAncestors = new Set<string>()
+  let ancestorsComplete = true
+  for (const row of ancestorRows) {
+    const ancestor = toSessionSummary(row)
+    if (seenAncestors.has(ancestor.sessionId)) {
+      // A cycle in the log's lineage links: stop where it closes instead of listing a session twice.
+      ancestorsComplete = false
+      break
+    }
+    seenAncestors.add(ancestor.sessionId)
+    ancestors.push(ancestor)
+  }
+  // The chain is complete only when the deepest ancestor it reached is itself a root. A held
+  // `parent_session` that is not in the index — on the target or on the deepest ancestor — means the
+  // parent exists somewhere this store cannot see, so "no ancestors" must not read as "this is a root".
+  if (target.parentSession !== undefined) {
+    // `nearest` is absent exactly when the walk found no parent row at all, which is the missing-parent
+    // case; the chain is only complete when it ended on a row that is itself a root.
+    const nearest = ancestors[ancestors.length - 1]
+    ancestorsComplete = nearest !== undefined && nearest.parentSession === undefined
+  }
+
+  const descendantRows = rows(
+    db,
+    `WITH RECURSIVE lineage(id, depth) AS (
+       SELECT id, 0 FROM session WHERE id = ?
+       UNION ALL
+       SELECT s.id, l.depth + 1
+         FROM session s JOIN lineage l ON s.parent_session = l.id
+        WHERE l.depth < ?
+     )
+     SELECT ${SESSION_COLUMNS_S}, l.depth AS depth
+       FROM session s JOIN lineage l ON l.id = s.id
+      WHERE l.depth > 0
+      ORDER BY l.depth ASC, s.created_at ASC, s.id ASC`,
+    [id, depth],
+  )
+  const descendants: SessiongraphTraceNode[] = []
+  const nodesById = new Map<string, SessiongraphTraceNode>()
+  const seenDescendants = new Set<string>([id])
+  let deepest = 0
+  let descendantsComplete = true
+  for (const row of descendantRows) {
+    const summary = toSessionSummary(row)
+    // A cyclic lineage can walk back onto an already-seen session; keep the first (shallowest) copy.
+    if (seenDescendants.has(summary.sessionId)) {
+      descendantsComplete = false
+      continue
+    }
+    seenDescendants.add(summary.sessionId)
+    const node: SessiongraphTraceNode = { session: summary, descendants: [] }
+    nodesById.set(summary.sessionId, node)
+    const parentId = summary.parentSession
+    const parent = parentId === undefined ? undefined : nodesById.get(parentId)
+    if (parent === undefined) descendants.push(node)
+    else parent.descendants.push(node)
+    const rowDepth = row['depth']
+    if (typeof rowDepth === 'number' && rowDepth > deepest) deepest = rowDepth
+  }
+  // A walk that reached its bound may have stopped short: ask whether anything hangs below the
+  // deepest level it returned. One bounded query is cheaper and more honest than always reporting
+  // `complete: false` for a depth-limited walk that happened to see everything.
+  //
+  // `depth: 0` has no returned level to inspect, so its frontier is the target itself — without that
+  // case a request that asked for zero levels would claim the target has no descendants.
+  const frontier = depth === 0 ? [id as string] : deepest >= depth ? [...nodesById.keys()] : []
+  if (frontier.length > 0) {
+    const placeholders = frontier.map(() => '?').join(', ')
+    const below = count(
+      db,
+      `SELECT count(*) AS total FROM session WHERE parent_session IN (${placeholders})`,
+      frontier,
+    )
+    if (below > 0) descendantsComplete = false
+  }
+
+  return {
+    operation: 'trace',
+    kind: 'session',
+    target,
+    ancestors,
+    descendants,
+    complete: ancestorsComplete && descendantsComplete,
+  }
+}
+
+/**
+ * Read the source log an indexed session came from.
+ *
+ * A live session (`live://` source) has no log yet; that is a real state, not corruption, so it is
+ * reported as `SESSIONGRAPH_IO` with the reason rather than as a missing session.
+ * @param db - the open index connection.
+ * @param id - the resolved session id.
+ * @returns the parsed raw log.
+ */
+function readRawLog(db: DatabaseSync, id: SessiongraphSessionId): RawSessionLog {
+  const row = rows(db, 'SELECT source_path FROM session WHERE id = ?', [id])[0]
+  if (row === undefined) {
+    throw new SessiongraphError(`no indexed session matches "${id}"`, 'SESSIONGRAPH_NOT_FOUND')
+  }
+  const sourcePath = row['source_path']
+  if (typeof sourcePath !== 'string') {
+    throw new SessiongraphError(`indexed session "${id}" has a non-text "source_path"`, 'SESSIONGRAPH_CORRUPT')
+  }
+  if (isLiveSource(sourcePath)) {
+    throw new SessiongraphError(
+      `session "${id}" is still running: its log is not on disk yet, so its raw events cannot be read`,
+      'SESSIONGRAPH_IO',
+    )
+  }
+  try {
+    const log = readRawEvents(sourcePath)
+    if (log === undefined) {
+      throw new SessiongraphError(`session "${id}" has no readable source log`, 'SESSIONGRAPH_IO')
+    }
+    return log
+  } catch (error) {
+    if (error instanceof SessiongraphError) throw error
+    throw new SessiongraphError(
+      `cannot read the source log of session "${id}" (${describeError(error)})`,
+      'SESSIONGRAPH_IO',
+    )
+  }
+}
+
+/** One diagnostic line from a caught value, without assuming it is an Error. */
+function describeError(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause)
 }
 
 /**

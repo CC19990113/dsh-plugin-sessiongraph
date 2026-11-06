@@ -179,7 +179,12 @@ describe('index database', () => {
 describe('search', () => {
   it('matches a two-character Chinese term through the bigram index', async () => {
     const root = await project()
-    const result = search(connection(root), { operation: 'search', indexRoot: root, query: '广告', limit: 10 }, 240)
+    // One hit per entry, so this test sees every match rather than the strongest one per session.
+    const result = search(
+      connection(root),
+      { operation: 'search', indexRoot: root, query: '广告', dedupeBySession: false, limit: 10 },
+      240,
+    )
     expect(result.total).toBe(3)
     expect(result.hits).toHaveLength(3)
     for (const hit of result.hits) {
@@ -248,7 +253,7 @@ describe('search', () => {
     const db = connection(await project())
     const exact = search(
       db,
-      { operation: 'search', indexRoot: '', query: '广告', workspace: WORKSPACE_ADX, limit: 10 },
+      { operation: 'search', indexRoot: '', query: '广告', workspace: WORKSPACE_ADX, dedupeBySession: false, limit: 10 },
       240,
     )
     expect(exact.total).toBe(2)
@@ -256,7 +261,7 @@ describe('search', () => {
     // A trailing slash marks a prefix filter, which here spans two workspaces.
     const prefix = search(
       db,
-      { operation: 'search', indexRoot: '', query: '广告', workspace: '/Users/admin/www/', limit: 10 },
+      { operation: 'search', indexRoot: '', query: '广告', workspace: '/Users/admin/www/', dedupeBySession: false, limit: 10 },
       240,
     )
     expect(prefix.total).toBe(3)
@@ -466,9 +471,10 @@ describe('store plugin', () => {
     const ctx = await mount()
     expect(await seam(ctx).available(root)).toBe(true)
 
+    // Two sessions mention 广告; the default dedupe keeps the strongest entry from each.
     const found = await seam(ctx).query({ operation: 'search', indexRoot: root, query: '广告', limit: 10 })
-    expect(found.total).toBe(3)
-    expect(found.hits).toHaveLength(3)
+    expect(found.total).toBe(2)
+    expect(found.hits).toHaveLength(2)
 
     const indexStatus = await seam(ctx).query({ operation: 'status', indexRoot: root })
     expect(indexStatus.indexed).toBe(true)

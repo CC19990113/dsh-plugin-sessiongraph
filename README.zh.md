@@ -78,7 +78,7 @@
 | `workspaces` | 工作区清单与统计 |
 | `status` | 索引自身状态；**唯一在无索引时也能回答的操作** |
 
-`sessiongraph_index`：建或刷新索引，独立 300s 预算；源文件 mtime+size 未变就跳过，会话攒到 1000+ 时转后台 job 并返回 jobId。
+`sessiongraph`（operation `index`）：建或刷新索引，与查询共用 30s 工具预算；源文件 mtime+size 未变就跳过，会话攒到 1000+ 时转后台 job 并返回 jobId。
 
 ### 命令
 
@@ -101,7 +101,7 @@
 | **查询前** | `status.json` 的 `indexedAt` 超过 5 分钟就先增量再查 | 约 400ms |
 | **当前会话** | 接入宿主 `ctx.sessionQuery`，把还没落盘的 live 会话也索引进来 | 可忽略 |
 
-想完全手动：`autoBuild: false` 关掉首次自动建库，`autoIndex: false` 连增量也关掉，之后一切靠 `sessiongraph_index` / `/sessiongraph index`。
+想完全手动：`autoBuild: false` 关掉首次自动建库，`autoIndex: false` 连增量也关掉，之后一切靠 `sessiongraph`（operation `index`） / `/sessiongraph index`。
 
 **每一轮都有 deadline**：自动刷新超过 `autoIndexTimeoutMs`（默认 15 分钟）会被 abort 并释放该 indexRoot，避免一个永不结束的 run 把后续会话的自动刷新永久抑制。
 
@@ -134,7 +134,7 @@ dsh plugin add dsh-plugin-sessiongraph
 "dsh": { "profile": { "bundles": [ "...", "dsh-plugin-sessiongraph" ] } }
 ```
 
-装完重启 DSH，首次调用 `sessiongraph_index` 建库，之后自动增量。
+装完重启 DSH，首次调用 `sessiongraph`（operation `index`） 建库，之后自动增量。
 
 ## 开发
 

@@ -219,7 +219,7 @@ function pluginConfig(root: string, updateCheck: boolean): Config {
     freshnessThresholdMs: 300_000,
     injectCommandResults: false,
     timeoutMs: 30_000,
-    indexTimeoutMs: 300_000,
+    backgroundIndexThreshold: 1_000,
     updateCheck,
   }
 }
@@ -264,13 +264,15 @@ describe('the plugin with update checking', () => {
     return path
   }
 
-  it('answers both tools and registers no hook when checking is switched off', async () => {
+  it('answers the one tool and registers no hook when checking is switched off', async () => {
     const root = tempDir('sessiongraph-off-')
     const harness = pluginContext(root)
     apply(harness.ctx, pluginConfig(root, false))
 
-    expect([...harness.tools.keys()].sort()).toEqual(['sessiongraph', 'sessiongraph_index'])
-    expect(harness.created).toHaveLength(0)
+    expect([...harness.tools.keys()].sort()).toEqual(['sessiongraph'])
+    // `apply` also wires the history-hint and visibility listeners on `agent/created`, so the
+    // baseline is 2 rather than 0. What this asserts is that the update check adds none.
+    expect(harness.created).toHaveLength(2)
     const value = await harness.tools.get('sessiongraph')?.execute(
       { operation: 'status' },
       { signal: new AbortController().signal },
@@ -287,14 +289,17 @@ describe('the plugin with update checking', () => {
     const harness = pluginContext(root)
     apply(harness.ctx, pluginConfig(root, true))
 
-    expect(harness.created).toHaveLength(1)
+    // 2 baseline listeners (history-hint + visibility) plus the update check's own.
+    expect(harness.created).toHaveLength(3)
     await harness.tools.get('sessiongraph')?.execute(
       { operation: 'status' },
       { signal: new AbortController().signal, agent: { id: 'agent-1' } },
     )
 
     const agent = fakeAgentScope()
-    harness.created[0]?.({ agent: { id: 'agent-1', ctx: agent.scope } })
+    // The update check registers its listener last, so `created[0]` is now history-hint's or
+    // visibility's — drive the newest one instead of assuming an index.
+    harness.created.at(-1)?.({ agent: { id: 'agent-1', ctx: agent.scope } })
     const notice = await waitForNotice(agent.listeners[0] as PreStepListener)
     expect(notice.messages).toHaveLength(1)
     expect(notice.messages[0]).toMatchObject({
