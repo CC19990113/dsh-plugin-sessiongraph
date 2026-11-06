@@ -312,6 +312,22 @@ function readPanelFile(file: string): PanelFile | undefined {
 }
 
 /**
+ * The host filesystem seam, or undefined when this composition has none.
+ *
+ * This plugin deliberately does not `inject` `fs` — the panel is optional and must not add a
+ * dependency to the tool's load path — so the lookup has to tolerate absence without throwing.
+ * @param ctx - the plugin context.
+ * @returns the seam when the host provides one.
+ */
+function optionalFsSeam(ctx: Context): FsSeam | undefined {
+  try {
+    return ctx.get('fs') as unknown as FsSeam | undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Persist the settings document, preferring the host's filesystem seam.
  *
  * The seam is the right backend when one exists (it owns read/write policy and atomic publication),
@@ -325,7 +341,10 @@ function readPanelFile(file: string): PanelFile | undefined {
  */
 async function writePanelFile(ctx: Context, file: string, document: PanelFile): Promise<boolean> {
   const text = `${JSON.stringify(document, undefined, 2)}\n`
-  const seam = (ctx as unknown as { fs?: FsSeam }).fs
+  // `ctx.<service>` on a Cordis context whose plugin does not inject that service THROWS rather
+  // than reading as undefined, so a property access here escaped the fallback entirely and turned
+  // every save into `cannot get property "fs" without inject`. `ctx.get(name)` is the safe read.
+  const seam = optionalFsSeam(ctx)
   if (seam !== undefined && typeof seam.resolve === 'function' && typeof seam.writeText === 'function') {
     try {
       const target = await seam.resolve(file, { cwd: dirname(file) })

@@ -255,7 +255,7 @@ function asPrompt(value: unknown): PromptSectionService | undefined {
  * @returns the known global names, or `undefined` when the registry cannot be inspected.
  */
 function knownGlobalTools(ctx: Context): ReadonlySet<string> | undefined {
-  const tools = asTools((ctx as unknown as { tools?: unknown }).tools)
+  const tools = asTools(readService<unknown>(ctx, 'tools'))
   if (tools === undefined || typeof tools.view !== 'function') return undefined
   try {
     const view = tools.view(undefined)
@@ -263,6 +263,33 @@ function knownGlobalTools(ctx: Context): ReadonlySet<string> | undefined {
     return names === undefined ? undefined : new Set(names)
   } catch (error) {
     warnOnce('view', '[sessiongraph] the tool registry could not be inspected; tool visibility is left alone:', error)
+    return undefined
+  }
+}
+
+/**
+ * Read an optional service without tripping Cordis's un-injected-property guard.
+ *
+ * `ctx.<service>` on a context that did not `inject` that service THROWS — it does not read as
+ * `undefined` — so a plain property access here took down every agent creation with
+ * `cannot get property "agents" without inject`. `ctx.get(name)` is the supported read, and the
+ * property fallback keeps the plain test doubles working.
+ * @param ctx - the plugin context (or an agent's scoped context).
+ * @param name - the service name.
+ * @returns the service, or undefined when this composition does not provide it.
+ */
+function readService<T>(ctx: unknown, name: string): T | undefined {
+  const holder = ctx as { get?: (key: string) => unknown } & Record<string, unknown>
+  if (typeof holder?.get === 'function') {
+    try {
+      return holder.get(name) as T | undefined
+    } catch {
+      return undefined
+    }
+  }
+  try {
+    return holder?.[name] as T | undefined
+  } catch {
     return undefined
   }
 }
@@ -285,7 +312,7 @@ export function normalizeToolSet(value: unknown): ToolSet {
  * @returns the live agents, newest last.
  */
 function listAgents(ctx: Context): readonly AgentLike[] {
-  const registry = (ctx as unknown as { agents?: AgentRegistry }).agents
+  const registry = readService<AgentRegistry>(ctx, 'agents')
   if (registry === undefined || typeof registry.list !== 'function') return []
   try {
     const agents = registry.list()
@@ -342,7 +369,7 @@ function replacementSection(mode: ToolSet): PromptSectionInput | undefined {
  * @returns the disposer that lifts it, or `undefined` when the registry refused.
  */
 function restrictWithin(scope: ScopedContext, deny: readonly string[]): (() => void) | undefined {
-  const tools = asTools(scope.tools)
+  const tools = asTools(readService<unknown>(scope, 'tools'))
   if (tools === undefined || typeof tools.restrict !== 'function') return undefined
   try {
     return tools.restrict({ deny })
@@ -361,7 +388,7 @@ function restrictWithin(scope: ScopedContext, deny: readonly string[]): (() => v
  * @returns the disposer that removes it, or `undefined` when the prompt registry refused.
  */
 function shadowWithin(scope: ScopedContext, section: PromptSectionInput): (() => void) | undefined {
-  const prompt = asPrompt(scope.systemPrompt)
+  const prompt = asPrompt(readService<unknown>(scope, 'systemPrompt'))
   if (prompt === undefined) return undefined
   try {
     return prompt.section(section)

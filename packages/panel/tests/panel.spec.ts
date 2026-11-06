@@ -119,6 +119,18 @@ function harness(options: { root: string; known?: readonly string[]; seam?: bool
     systemPrompt: scope('global').systemPrompt,
     on: () => () => true,
     effect: (run: () => unknown) => run(),
+    // `ctx.get(name)` is how the panel reads optional services: a property access on an
+    // un-injected service throws on a real Cordis context, which is exactly the bug this shape
+    // exists to keep covered.
+    get(name: string) {
+      const services: Record<string, unknown> = {
+        fs: (host as { fs?: unknown }).fs,
+        tools: host.tools,
+        agents: host.agents,
+        systemPrompt: host.systemPrompt,
+      }
+      return services[name]
+    },
     inject(_deps: string[], callback: (child: unknown) => void) {
       callback({ webServer, effect: (run: () => unknown) => run() })
     },
