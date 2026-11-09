@@ -183,6 +183,8 @@ export const DEFAULT_FRESHNESS_THRESHOLD_MS = 300_000
 export const SESSIONGRAPH_PROMPT_TEXT =
   '查我自己过去的对话（「上次在哪个会话里说过/做过什么」）用 sessiongraph，不要 grep ~/.dsh/sessions：'
   + '那里的会话按工作区散在子目录里，是 zstd 压缩的 JSONL，grep 读不到正文，解压全量也慢。'
+  + '索引同时含两个 agent 的历史：本宿主的 DSH 会话与 OpenAI Codex 的 rollout 日志，'
+  + '每条结果带 source（dsh / codex），需要只看一侧时给 search / timeline / workspaces 传 source。'
   + 'sessiongraph 从预建索引回答：search 跨会话全文检索（中文按双字切分，两字词即可命中，如「广告」）、'
   + 'session 按 id 或唯一前缀打开一个会话、event 读某一条原始事件（可带前后窗口）、'
   + 'trace 追会话血缘或事件的替换/引用关系、timeline 按时间列会话、workspaces 列工作区统计。'
@@ -324,7 +326,8 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'sessiongraph',
     description:
-      '检索本机全部 DSH 会话的历史对话（不是代码）：跨会话全文搜索「上次在哪个会话里说过/做过什么」、按 id 打开一个会话、'
+      '检索本机全部 agent 会话的历史对话（不是代码）：DSH 自己的会话与 OpenAI Codex 的 rollout 日志索引在同一处，'
+      + '结果带 source（dsh / codex）可按来源过滤。跨会话全文搜索「上次在哪个会话里说过/做过什么」、按 id 打开一个会话、'
       + '读某一条原始事件、追踪会话血缘或事件的替换/引用关系、按时间列会话、列工作区统计、看索引状态、建/刷新索引。'
       + '答案来自预建索引，比 grep ~/.dsh/sessions 更快也更完整（那里的 JSONL 是 zstd 压缩的，grep 读不到）。'
       + '中文按两字词检索即可命中（如「广告」）。索引不存在时除 status 外都会失败，先跑 operation=index；'

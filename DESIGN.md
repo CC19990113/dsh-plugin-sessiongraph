@@ -153,12 +153,12 @@ schema 见 `packages/service/src/schema.ts`（`SCHEMA_STATEMENTS`），三方共
 
 | operation | 作用 |
 |---|---|
-| `search` | 全文检索，可按 `sessionId` / `workspace` / `after` / `before` / `kinds` 过滤，默认同会话去重（`dedupeBySession`），返回命中列表（含片段） |
+| `search` | 全文检索，可按 `sessionId` / `workspace` / `source` / `after` / `before` / `kinds` 过滤，默认同会话去重（`dedupeBySession`），返回命中列表（含 `source` 与片段） |
 | `session` | 按完整 id 或唯一前缀读一个会话（元信息 + 有序 entries + 子会话） |
 | `event` | 读一条**未删节**的原始事件（回读源日志，不读索引里的裁剪文本）+ 可选前后窗口 |
 | `trace` | 无 `seq` → 会话血缘（祖先链 + 递归后代树，`complete` 区分「根」与「走不动」）；有 `seq` → 事件替换链 / 遮蔽范围 / 引用源事件 |
-| `timeline` | 按时间列会话（可过滤 workspace），新→旧 |
-| `workspaces` | 工作区清单与统计（会话数、条目数、时间跨度） |
+| `timeline` | 按时间列会话（可过滤 workspace / source），新→旧 |
+| `workspaces` | 工作区清单与统计（会话数、条目数、时间跨度），可按 source 只看一侧 |
 | `status` | 索引自身状态；**唯一**在无索引时也返回结果的操作 |
 
 **`index` 不在这七个里面。** 它是写操作，由工具层直接调 `ctx.sessiongraph.index()`；放进查询
@@ -285,6 +285,9 @@ DSH 内核已经有一整套会话查询设施，能用的直接用：
 - **补充路径**：每轮问 `sessionQuery.listSessions()`，挑 `live === true` 的（通常 1–3 个），`readSession()` 拿事件后重建。上限 `maxLiveSessions`（默认 8）
 - live 会话每轮都重建（它们还在变，没有稳定 mtime 可依赖）
 - live 路径放在主写事务**之外**，`readSession` 回放慢也不拖长主索引
+- **第二源（Codex）受设置页开关控制**：每轮读 `<indexRoot>/panel.json` 的 `codexSync`，
+  `codexSync ?? config.codex`。面板不是唯一真相 —— 只有人明确保存过的值才算数，文件缺失或损坏
+  一律回退配置。关掉那一轮把已有 codex 行按 `removed` 删除，不碰 `~/.codex` 本身
 
 ## 13. 写并发与索引损坏的防护
 

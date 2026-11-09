@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-sessiongraph-panel",
   "version": "0.2.0",
-  "description": "Settings-page panel for dsh-plugin-sessiongraph: a 会话检索 tab that switches which session-reading tools the model can see (sessiongraph / kernel / both). Browser half only — every value comes from the host's /dsh-plugin-sessiongraph/api/* routes.",
+  "description": "Settings-page panel for dsh-plugin-sessiongraph: a 会话检索 tab that switches which session-reading tools the model can see (sessiongraph / kernel / both) and whether Codex's history joins the index. Browser half only — every value comes from the host's /dsh-plugin-sessiongraph/api/* routes.",
   "keywords": [
     "dsh",
     "dsh-plugin",

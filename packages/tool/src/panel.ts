@@ -5,14 +5,20 @@
  * visibility layer reads, and the persisted file lives beside the index this package already knows
  * the root of. A separate host package would need that root and a second definition of the choice.
  *
- * The persisted file is `<indexRoot>/panel.json`, one JSON object. It is the settings page's own
- * storage, not an index artifact: it is read once at load (so a choice survives a restart) and
- * rewritten on every save, and a missing or unreadable file simply means "use the configured value"
- * — a broken panel must never stop the plugin from loading.
+ * The persisted file is `<indexRoot>/panel.json`, one JSON object holding two independent choices:
+ * `toolSet` (which session-reading tools the model sees) and `codexSync` (whether Codex's rollout
+ * logs join the index). It is the settings page's own storage, not an index artifact: it is read at
+ * load and rewritten on every save, and a missing or unreadable file simply means "use the configured
+ * value" — a broken panel must never stop the plugin from loading.
  *
- * The route table is deliberately tiny: a GET that reports the current choice plus which tools this
- * host actually registered, and a POST that validates one enum value, persists it, and re-applies it
- * to the live agents. Nothing here accepts a path, so there is no path-traversal surface at all.
+ * The two choices take effect on different clocks, which is why this module never applies `codexSync`
+ * itself: `toolSet` is applied to live agents here, while `codexSync` is read by the **indexer** on
+ * each run (it is the same file — see `PANEL_FILE_NAME` in the seam package). A save therefore stores
+ * the switch and lets the next index run act on it.
+ *
+ * The route table is deliberately tiny: a GET that reports the current choices plus which tools this
+ * host actually registered, and a POST that validates them, persists them, and re-applies the tool
+ * set to the live agents. Nothing here accepts a path, so there is no path-traversal surface at all.
  *
  * The port is loopback, which every page in the user's browser can reach, so "a request arrived" is
  * not evidence the user asked for it. The save therefore proves its provenance before it is allowed
