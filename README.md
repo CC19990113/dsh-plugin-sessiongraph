@@ -179,7 +179,7 @@ Three Codex rules were learned the hard way:
 
 Measured here: Codex 88 sessions / 27752 entries (1427 user, 8222 assistant, 18069 tool), DSH 764 sessions / 112562 entries — 27 s for a full rebuild, 274 ms incremental.
 
-**The native kernel does not read Codex yet** — the Rust parser covers DSH logs only. So when `codex` is on and `~/.codex` really holds logs, that run takes the TypeScript engine (with a stderr line when `engine: 'native'` was pinned) rather than silently dropping half the corpus. `codex: false` turns Codex collection off; `codexRoot` points at another Codex home.
+**Both engines read the same sources** — since 0.3.2 the Rust parser reads Codex rollouts too (`crates/sessiongraph-core/src/codex.rs`), and the two engines agree number for number on a frozen corpus (89 sessions / 27847 entries). So with `codex: true`, `engine: 'auto'` stays on native instead of falling back. `codex: false` turns Codex collection off; `codexRoot` points at another Codex home.
 
 ### Why two-character Chinese terms match
 

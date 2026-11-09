@@ -110,7 +110,7 @@ function decompressSessionLog(buffer: Buffer): Buffer {
 
 **去重**：同一会话可能同时出现在 `archived_sessions/` 和 `sessions/`，所以候选集按 `session.id` 去重（保留 `lastAt` 更大的那份），而不是按路径。
 
-**native 边界**：Rust 内核只解析 DSH 日志。`codex` 打开且确实扫到文件时，那次运行跳过 native 直接走 TypeScript（`engine: 'native'` 时 stderr 一行说明）；否则半份语料会被静默丢掉。
+**native 边界**：Rust 内核自 0.3.2 起也解析 Codex（`codex.rs`），两源按 `source` 分派。两套引擎的对拍方法：拿一份**冻结快照**（复制会话文件，排除活会话边写边读）双引擎各跑一遍，逐数比对；真实库里两次 run 相差几条通常是读取时刻不同，不是解析分歧。
 
 ## 2. 索引库
 

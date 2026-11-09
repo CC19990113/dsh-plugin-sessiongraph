@@ -179,7 +179,7 @@ Codex 侧的三条规则是踩过才定的：
 
 索引的量级参考（本机）：Codex 88 会话 / 27752 条（user 1427、assistant 8222、tool 18069），DSH 764 会话 / 112562 条，合起来全量重建 27 秒、增量 274ms。
 
-**原生内核暂未覆盖 Codex**：Rust 只解析 DSH 日志。所以当 `codex` 打开且 `~/.codex` 里确实有日志时，那一次运行直接走 TypeScript 引擎（`engine: 'native'` 时在 stderr 说明原因），而不是悄悄丢掉一半语料。`codex: false` 关闭 Codex 采集，`codexRoot` 换个 Codex home。
+**原生内核与 TypeScript 引擎解析同一批源**：Rust 侧在 0.3.2 起也读 Codex rollout（`crates/sessiongraph-core/src/codex.rs`），两套引擎对同一份冻结语料逐数一致（89 会话 / 27847 条）。所以 `codex: true` 时 `engine: 'auto'` 仍然用 native，不再回退。`codex: false` 关闭 Codex 采集，`codexRoot` 换个 Codex home。
 
 ### 中文为什么两字词能命中
 

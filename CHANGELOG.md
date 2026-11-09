@@ -2,6 +2,35 @@
 
 本项目从 0.3.0 起维护此文件；更早的版本只列关键节点，逐条变更见 `git log`。
 
+## 0.3.2
+
+### 新增
+
+- **Rust 内核也解析 Codex rollout**（`crates/sessiongraph-core/src/codex.rs`）：注入块剥离、`developer`
+  跳过、三种 tool call、`createdAt` 取最早 timestamp、标题取自 `session_index.jsonl`，与 TypeScript
+  侧的 `codex.ts` 逐条对齐。
+- `IndexOptions` 加 `codex` / `codexRoot`；两源合并后按 `source` 分派解析，去重键对齐 TypeScript 的
+  `last_at`。
+
+### 性能
+
+- **打开 Codex 源时不再回退 TypeScript 引擎**：全量 34.8s → 9.4s（本机 856 会话 / 141891 条）。
+  此前 `codex: true` 且 `~/.codex` 有日志时整轮跳过 native。
+
+### 修复
+
+- `write.rs` 的 `source` 列此前写死 `'dsh'`，改为随会话绑定。
+
+### 内部
+
+- `parse.rs` 的三个工具函数提为 `pub(crate)` 供 Codex 解析复用 —— 两个解析器必须共用同一套
+  clip/空白策略，否则同一句话会因 harness 不同而存得不一样。
+
+### 对拍方法
+
+拿一份**冻结快照**（复制会话文件，排除活会话边写边读）让两个引擎各跑一遍：89 会话 / 27847 条，
+逐数一致。真实库里两次 run 相差几条通常是读取时刻不同，不是解析分歧。
+
 ## 0.3.1
 
 ### 修复
