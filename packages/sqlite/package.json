@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-sessiongraph-sqlite",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Read-only SQLite store for the DeepSeek Harness session-graph seam — answers search/session/event/trace/timeline/workspaces/status from the on-disk index at <indexRoot>/index.db (and, for raw events, the session source log) without ever writing to it",
   "keywords": [
     "dsh",
