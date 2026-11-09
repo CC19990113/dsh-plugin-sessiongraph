@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-sessiongraph-tool",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Model-facing tool for DeepSeek Harness — one read-only `sessiongraph` tool with eight operations: full-text search over local conversation history (Chinese bigram), single-session reads, unabridged event reads, lineage and event tracing, timeline/workspace census, and index runs that delegate to a host background job on large stores",
   "keywords": [
     "dsh",
