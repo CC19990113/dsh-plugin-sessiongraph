@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { validateJsonSchemaValue, valueSchemaSpecToJsonSchema } from '@deepseek-ai/dsh-tools'
 import type {
   SessiongraphEventResult,
   SessiongraphIndexReport,
@@ -24,8 +25,9 @@ import type {
   SessiongraphWorkspacesResult,
 } from 'dsh-plugin-sessiongraph-service'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apply } from '../src/index.ts'
+import { apply, callTitle } from '../src/index.ts'
 import type { Config } from '../src/index.ts'
+import { SESSIONGRAPH_OUTPUT_SCHEMA } from '../src/schema.ts'
 import type { SessiongraphToolValue } from '../src/schema.ts'
 
 /** The slice of a registered tool these tests drive. */
@@ -269,6 +271,13 @@ describe('registration', () => {
   })
 })
 
+describe('callTitle', () => {
+  it('names the defaulted operation when the model omitted one', () => {
+    expect(callTitle({ query: '广告' })).toBe('sessiongraph search 广告')
+    expect(callTitle({ operation: 'index' })).toBe('sessiongraph index')
+  })
+})
+
 describe('operation dispatch', () => {
   it('runs every query operation through ctx.sessiongraph.query', async () => {
     const harnessed = harness()
@@ -285,6 +294,22 @@ describe('operation dispatch', () => {
     for (const [, args] of calls) await tool.execute(args, exec())
     expect(harnessed.queries).toEqual(calls.map(([operation]) => operation))
     expect(harnessed.indexOptions).toEqual([])
+  })
+
+  it('runs a call with no operation as a search', async () => {
+    const harnessed = harness()
+    const value = await onlyTool(harnessed).execute({ query: '广告' }, exec()) as SessiongraphToolValue
+    expect(harnessed.queries).toEqual(['search'])
+    // The defaulted call still reports its operation, and the closed oneOf output accepts the value.
+    expect(value).toMatchObject({ operation: 'search', total: 0 })
+    expect(validateJsonSchemaValue(valueSchemaSpecToJsonSchema(SESSIONGRAPH_OUTPUT_SCHEMA), value)).toEqual([])
+  })
+
+  it('keeps an explicit operation instead of the search default', async () => {
+    const harnessed = harness()
+    const value = await onlyTool(harnessed).execute({ operation: 'timeline' }, exec()) as SessiongraphToolValue
+    expect(harnessed.queries).toEqual(['timeline'])
+    expect(value.operation).toBe('timeline')
   })
 
   it('routes index to ctx.sessiongraph.index and never to query', async () => {

@@ -308,15 +308,16 @@ export const SESSIONGRAPH_OUTPUT_SCHEMA = {
  * The parameters the model fills in. Which ones apply depends on `operation`; the conditional
  * requirements (`query` for `search`, `session_id` for `session`/`event`/`trace`, `seq` for `event`)
  * are enforced when the request is built, because the parameter DSL has no per-operation
- * conditionals.
+ * conditionals. `operation` itself is optional and defaults to `search` (applied once, in the tool's
+ * entry layer), so the common case — a plain cross-session search — names only `query`.
  */
 export const SESSIONGRAPH_PARAMETERS = {
   operation: {
     type: 'string',
-    required: true,
     enum: [...SESSIONGRAPH_TOOL_OPERATIONS],
     description:
-      'search（跨会话全文检索）、session（按 id 或唯一前缀读一个会话）、event（读某一条原始事件，含前后窗口）、'
+      '省略即 search（默认）：只传 query 就是一次跨会话检索。'
+      + 'search（跨会话全文检索）、session（按 id 或唯一前缀读一个会话）、event（读某一条原始事件，含前后窗口）、'
       + 'trace（追踪会话血缘，或某条事件的替换/引用关系）、timeline（按时间列会话，新→旧）、'
       + 'workspaces（工作区清单与统计）、status（索引自身状态）、index（建或刷新索引）。'
       + 'status 是唯一在还没有索引时也能回答的操作；索引不存在时其它操作会失败，先跑 index。',

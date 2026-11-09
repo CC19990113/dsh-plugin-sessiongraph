@@ -67,8 +67,8 @@ describe('SESSIONGRAPH_PARAMETERS', () => {
     expect(violations.join('\n')).toContain('operation')
   })
 
-  it('rejects a missing operation', () => {
-    expect(validateArgs(SESSIONGRAPH_PARAMETERS, { query: '广告' }).length).toBeGreaterThan(0)
+  it('accepts a call that omits operation, since the tool defaults it to search', () => {
+    expect(validateArgs(SESSIONGRAPH_PARAMETERS, { query: '广告' })).toEqual([])
   })
 
   it('rejects an entry kind outside the seam vocabulary', () => {
@@ -94,6 +94,18 @@ describe('SESSIONGRAPH_PARAMETERS', () => {
 })
 
 describe('buildRequest', () => {
+  it('defaults an omitted operation to search and builds the ordinary search request', () => {
+    expect(buildRequest({ query: '广告' }, '/root', 100)).toEqual({
+      operation: 'search',
+      indexRoot: '/root',
+      query: '广告',
+      dedupeBySession: true,
+      limit: 10,
+    })
+    // The default is a search, not a wildcard: a call with neither operation nor query still fails.
+    expect(() => buildRequest({}, '/root', 100)).toThrow(/requires a non-empty "query"/)
+  })
+
   it('maps snake_case arguments onto the seam request and keeps every filter', () => {
     expect(buildRequest({
       operation: 'search',

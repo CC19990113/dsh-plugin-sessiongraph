@@ -73,7 +73,7 @@
 
 `sessiongraph`：
 
-**一个工具，八个 operation。** 从 0.2.0 起，索引不再是独立工具（`sessiongraph_index` 已删除）。
+**一个工具，八个 operation。** 从 0.2.0 起，索引不再是独立工具（`sessiongraph_index` 已删除）。`operation` **可省略，缺省即 `search`**：只传 `query` 就是一次跨会话检索，常见情况不用模型再重复声明一遍。
 
 | operation | 作用 |
 |---|---|

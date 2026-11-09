@@ -73,7 +73,7 @@ Memory does not overlap with either: a conversation may **never enter memory** (
 
 `sessiongraph`:
 
-**One tool, eight operations.** Since 0.2.0 indexing is no longer a separate tool (`sessiongraph_index` is gone).
+**One tool, eight operations.** Since 0.2.0 indexing is no longer a separate tool (`sessiongraph_index` is gone). `operation` is **optional and defaults to `search`**: a call that names only `query` is a cross-session search, so the model does not have to restate the common case.
 
 | Operation | What it does |
 |---|---|

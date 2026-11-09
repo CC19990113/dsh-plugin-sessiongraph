@@ -66,6 +66,7 @@ import {
 } from './schema.ts'
 import type {
   SessiongraphToolArgs,
+  SessiongraphToolOperation,
   SessiongraphToolValue,
   SessiongraphValueFor,
 } from './schema.ts'
@@ -328,7 +329,8 @@ export function apply(ctx: Context, config: Config): void {
     name: 'sessiongraph',
     description:
       '检索本机全部 agent 会话的历史对话（不是代码）：DSH 自己的会话与 OpenAI Codex 的 rollout 日志索引在同一处，'
-      + '结果带 source（dsh / codex）可按来源过滤。跨会话全文搜索「上次在哪个会话里说过/做过什么」、按 id 打开一个会话、'
+      + '结果带 source（dsh / codex）可按来源过滤。省略 operation 即 search（默认），只传 query 就能跨会话检索。'
+      + '跨会话全文搜索「上次在哪个会话里说过/做过什么」、按 id 打开一个会话、'
       + '读某一条原始事件、追踪会话血缘或事件的替换/引用关系、按时间列会话、列工作区统计、看索引状态、建/刷新索引。'
       + '答案来自预建索引，比 grep ~/.dsh/sessions 更快也更完整（那里的 JSONL 是 zstd 压缩的，grep 读不到）。'
       + '中文按两字词检索即可命中（如「广告」）。索引不存在时除 status 外都会失败，先跑 operation=index；'
@@ -347,7 +349,7 @@ export function apply(ctx: Context, config: Config): void {
     presentCall: args => ({
       card: 'generic' as const,
       title: callTitle(args),
-      kind: args.operation === 'index' ? 'execute' as const : 'search' as const,
+      kind: operationOf(args) === 'index' ? 'execute' as const : 'search' as const,
       rawInput: args,
     }),
   }))
@@ -514,21 +516,38 @@ export function registerUpdateNotice(ctx: Context, checker: UpdateChecker): void
 }
 
 /**
+ * The operation a call runs: the one the model named, or `search` when it named none.
+ *
+ * `operation` is optional on purpose. The overwhelmingly common call is a plain cross-session
+ * search, and making the model restate that costs one decision per call (plus an enum retry when it
+ * forgets). The default lives here and nowhere else: every entry point — `presentCall`,
+ * `buildRequest`, `runOperation` — narrows through this function instead of testing `undefined`
+ * per case.
+ * @param args - the validated tool arguments, possibly without an explicit operation.
+ * @returns the operation to run; never `undefined`.
+ */
+export function operationOf(args: SessiongraphToolArgs): SessiongraphToolOperation {
+  return args.operation ?? 'search'
+}
+
+/**
  * The one-line label a pending call shows.
  * @param args - the validated tool arguments.
  * @returns the card title naming the operation and whichever subject the operation takes.
  */
 export function callTitle(args: SessiongraphToolArgs): string {
+  const operation = operationOf(args)
   const subject = args.query ?? args.session_id ?? args.workspace
   const seq = args.seq === undefined ? '' : ` #${String(Math.trunc(args.seq))}`
   return subject === undefined
-    ? `sessiongraph ${args.operation}${seq}`
-    : `sessiongraph ${args.operation}${seq} ${subject}`
+    ? `sessiongraph ${operation}${seq}`
+    : `sessiongraph ${operation}${seq} ${subject}`
 }
 
 /**
  * Turn the model's snake_case arguments into the seam's camelCase request, applying the per-operation
- * defaults the seam refuses to guess.
+ * defaults the seam refuses to guess. An omitted `operation` means `search` (see {@link operationOf}),
+ * so a call that names only `query` builds the ordinary search request.
  *
  * Conditional requirements live here rather than in the parameter schema, because the parameter DSL
  * has no per-operation conditionals: `search` needs `query`, `session`/`event`/`trace` need
@@ -545,7 +564,8 @@ export function buildRequest(
   maxLimit: number,
 ): SessiongraphRequest {
   const offset = offsetOf(args.offset)
-  switch (args.operation) {
+  const operation = operationOf(args)
+  switch (operation) {
     case 'search': {
       const sessionId = optionalString(args.session_id)
       return {
@@ -621,7 +641,7 @@ export function buildRequest(
        parameter schema's closed operation enum. */
     default:
       throw new SessiongraphError(
-        `unknown sessiongraph operation ${JSON.stringify(args.operation)}`,
+        `unknown sessiongraph operation ${JSON.stringify(operation)}`,
         'SESSIONGRAPH_INVALID_REQUEST',
       )
   }
@@ -761,10 +781,13 @@ async function runOperation(
   args: SessiongraphToolArgs,
   exec: ToolExecution,
 ): Promise<SessiongraphToolValue> {
-  if (args.operation === 'index') return runIndexOperation(ctx, indexRoot, config, args, exec)
+  // One normalization for the whole call: an omitted operation is a search, and every branch below
+  // (as well as `buildRequest`) sees the resolved name rather than `undefined`.
+  const operation = operationOf(args)
+  if (operation === 'index') return runIndexOperation(ctx, indexRoot, config, args, exec)
   // `status` describes the index itself; refreshing first would make it report a state it just
   // changed, and the model uses it to decide whether to call `index` at all.
-  if (args.operation === 'status') return statusValue(ctx, indexRoot, exec.signal)
+  if (operation === 'status') return statusValue(ctx, indexRoot, exec.signal)
   const request = buildRequest(args, indexRoot, config.maxLimit)
   const refresh = await refresher.ensureFresh(exec.signal)
   try {
