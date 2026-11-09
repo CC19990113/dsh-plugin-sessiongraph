@@ -95,11 +95,8 @@ export interface HistoryHintMessage {
  * not evidence, and the index holds the original conversation.
  */
 export const HISTORY_HINT_TEXT =
-  '[会话历史提醒] 这个问题像是在问本机过去会话里发生过什么。'
-  + '注意：任何关于过去的**摘要**（记忆插件给的、系统上下文里的、更早对话里的复述，都算）都不是原文——'
-  + '可能漏、可能旧、也可能把两件事混在一起。先用 sessiongraph 查原文再回答：'
-  + 'search 跨会话检索、session 按 id 打开某个会话、event 读某一条原始事件；摘要只用来决定去哪儿查。'
-  + '也不要 grep ~/.dsh/sessions（zstd 压缩，读不到正文）。'
+  '[会话历史提醒] 这是在问本机过去会话的事，手上的摘要不是原文（可能漏、可能旧），'
+  + '先 sessiongraph 查原文再回答。别 grep ~/.dsh/sessions（zstd 压缩，读不到正文）。'
 
 /**
  * The per-conversation bookkeeping a {@link registerHistoryHint} listener keeps.
