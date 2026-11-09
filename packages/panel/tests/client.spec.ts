@@ -91,7 +91,7 @@ interface LoadedClient {
  * Load the client file in a sandbox and wire the registration it makes.
  * @returns the collected spec, fetch calls, and the registered settings section.
  */
-function load(): LoadedClient {
+function load(options: { readonly failSave?: boolean } = {}): LoadedClient {
   const react = fakeReact()
   const calls: FetchCall[] = []
   let collected: LoadedClient['spec'] | undefined
@@ -107,6 +107,9 @@ function load(): LoadedClient {
     console: { warn: () => undefined },
     fetch: async (url: string, init?: FetchCall['init']) => {
       calls.push({ url, init })
+      if (options.failSave === true && init?.method === 'POST') {
+        return { ok: false, status: 500, async json() { return { ok: false, message: 'boom' } } }
+      }
       // The save route echoes the choice it was given; the read route answers the default.
       const sent = init?.body === undefined ? null : (JSON.parse(init.body) as { toolSet?: string; codexSync?: boolean })
       const body = sent === null
@@ -252,16 +255,30 @@ describe('the settings panel client', () => {
     expect(box?.props.checked).toBe(true)
   })
 
-  it('posts the Codex choice alongside the tool set', async () => {
+  it('saves the Codex choice as soon as the switch moves', async () => {
+    // A switch that needs a second button press is a switch the user will not save: moving it must
+    // be the act, not a draft. The dropdown keeps its explicit save because choosing then confirming
+    // is what a select means.
     const client = load()
     const tree = await choose(client, 'sessiongraph')
     const box = find(tree, 'input')
     ;(box?.props.onChange as (event: { target: { checked: boolean } }) => void)({ target: { checked: false } })
-    const button = saveButton(mount(client))
-    await (button?.props.onClick as () => Promise<void>)()
+    await settle()
 
     const post = client.calls.find(call => call.init?.method === 'POST')
     expect(JSON.parse(post?.init?.body ?? '{}')).toEqual({ toolSet: 'sessiongraph', codexSync: false })
+  })
+
+  it('flips the switch back when the save fails', async () => {
+    const client = load({ failSave: true })
+    const tree = await choose(client, 'sessiongraph')
+    const box = find(tree, 'input')
+    ;(box?.props.onChange as (event: { target: { checked: boolean } }) => void)({ target: { checked: false } })
+    await settle()
+
+    // Optimistic update, then an honest rollback: the panel must show the value that is actually on
+    // disk, not the one the user wished for.
+    expect((find(mount(client), 'input'))?.props.checked).toBe(true)
   })
 
   it('posts the chosen value when 保存 is pressed', async () => {

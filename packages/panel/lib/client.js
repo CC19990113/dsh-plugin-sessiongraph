@@ -202,7 +202,17 @@ window.__ModuleLoader__.load({
         setLoaded(true);
       }
 
-      async function onSave() {
+      /**
+       * 落盘一次选择。
+       *
+       * 两个控件共用它：下拉必须显式点「保存」（选择后确认是下拉的语义），而开关是布尔量，
+       * 点一下就该生效 —— 一个需要再按一次按钮的开关，用户不会去按第二下。
+       *
+       * @param nextToolSet 要保存的工具集
+       * @param nextCodex 要保存的 Codex 开关
+       * @param revertOnFailure 失败时把开关拨回去的值；不给就不回滚
+       */
+      async function persist(nextToolSet, nextCodex, revertOnFailure) {
         if (busy !== null) return;
         setBusy("save");
         setError(null);
@@ -210,15 +220,16 @@ window.__ModuleLoader__.load({
         const result = await call(API + "/tools", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ toolSet: draft, codexSync: codexDraft }),
+          body: JSON.stringify({ toolSet: nextToolSet, codexSync: nextCodex }),
         });
         setBusy(null);
         if (!result.ok) {
           setError(result.message);
+          if (revertOnFailure !== undefined) setCodexDraft(revertOnFailure);
           return;
         }
         const data = result.data || {};
-        const saved = knownToolSet(data.toolSet) || draft;
+        const saved = knownToolSet(data.toolSet) || nextToolSet;
         const savedCodex = data.codexSync === true;
         setToolSet(saved);
         setDraft(saved);
@@ -227,9 +238,13 @@ window.__ModuleLoader__.load({
         if (data.available) setAvailable(data.available);
         setNotice(
           "已保存：工具集 " + saved + "；Codex 历史" + (savedCodex ? "纳入索引" : "不纳入索引") + "。"
-            + "工具集对之后创建的会话立即生效，已在跑的会话在下一步重新读取工具表；"
-            + "Codex 开关在下次索引运行时生效（下一次自动刷新或手动建索引）。",
+            + "工具集对之后创建的会话立即生效；Codex 开关在下次索引运行时生效（下一次自动刷新或手动建索引）。",
         );
+      }
+
+      /** 下拉的「保存」：把两个当前值一起写下去。 */
+      function onSave() {
+        return persist(draft, codexDraft);
       }
 
       const dirty = loaded && (draft !== toolSet || codexDraft !== codex);
@@ -297,8 +312,11 @@ window.__ModuleLoader__.load({
             role: "switch",
             "data-sessiongraph-codex": "",
             onChange: (event) => {
-              setCodexDraft(event.target.checked === true);
+              const next = event.target.checked === true;
+              // 乐观更新：先把开关拨到用户点的位置，请求失败再拨回去 —— 等一个往返才动会显得卡。
+              setCodexDraft(next);
               setNotice(null);
+              persist(draft, next, next === false);
             },
           }),
           h("span", { style: S.label }, "同步 Codex 的历史会话"),
