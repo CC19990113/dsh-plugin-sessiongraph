@@ -210,9 +210,8 @@ window.__ModuleLoader__.load({
        *
        * @param nextToolSet 要保存的工具集
        * @param nextCodex 要保存的 Codex 开关
-       * @param revertOnFailure 失败时把开关拨回去的值；不给就不回滚
        */
-      async function persist(nextToolSet, nextCodex, revertOnFailure) {
+      async function persist(nextToolSet, nextCodex) {
         if (busy !== null) return;
         setBusy("save");
         setError(null);
@@ -225,7 +224,6 @@ window.__ModuleLoader__.load({
         setBusy(null);
         if (!result.ok) {
           setError(result.message);
-          if (revertOnFailure !== undefined) setCodexDraft(revertOnFailure);
           return;
         }
         const data = result.data || {};
@@ -247,6 +245,7 @@ window.__ModuleLoader__.load({
         return persist(draft, codexDraft);
       }
 
+      // 两个控件共用一个保存：任何一项改动都算「未保存」，因为一次 POST 会把两项一起写下去。
       const dirty = loaded && (draft !== toolSet || codexDraft !== codex);
 
       const options = OPTIONS.map((option) =>
@@ -284,7 +283,7 @@ window.__ModuleLoader__.load({
                 type: "button",
                 style: busy !== null ? S.btnOff : S.btn,
                 disabled: busy !== null,
-                title: "保存并立即应用",
+                title: "保存并立即应用（工具集与 Codex 开关一起保存）",
                 onClick: onSave,
               },
               busy === "save" ? "保存中…" : "保存",
@@ -312,11 +311,8 @@ window.__ModuleLoader__.load({
             role: "switch",
             "data-sessiongraph-codex": "",
             onChange: (event) => {
-              const next = event.target.checked === true;
-              // 乐观更新：先把开关拨到用户点的位置，请求失败再拨回去 —— 等一个往返才动会显得卡。
-              setCodexDraft(next);
+              setCodexDraft(event.target.checked === true);
               setNotice(null);
-              persist(draft, next, next === false);
             },
           }),
           h("span", { style: S.label }, "同步 Codex 的历史会话"),

@@ -59,6 +59,7 @@ describe('renderSessiongraph search', () => {
     hits: [
       {
         session_id: '037ad8fc-29b8-4a69-9a02-e75f9cc8fb45',
+        source: 'dsh',
         title: '改广告 SDK',
         workspace: '/Users/admin/www/dsh-community',
         time: at(10, 3, 10, 37),
@@ -70,6 +71,7 @@ describe('renderSessiongraph search', () => {
       },
       {
         session_id: 'b7f1c0de-0000-4000-8000-000000000001',
+        source: 'dsh',
         workspace: '/Users/admin/www/dsh-plugin-other',
         time: at(10, 2, 9, 5),
         kind: 'assistant',
@@ -94,6 +96,26 @@ describe('renderSessiongraph search', () => {
     expect(text).toContain('第 3 轮')
     expect(text).toContain('我今天在改[广告]SDK')
     expect(text).toContain('/Users/admin/www/dsh-community')
+  })
+
+  it('tells the reader a Codex hit is not a DSH session', () => {
+    // A conversation that exists only as a Codex rollout has no sidebar entry and no DSH session id
+    // to jump to; without the note the answer sends the user looking for something that is not there.
+    const mixed: SessiongraphValueFor<'search'> = {
+      ...hits,
+      hits: [{ ...hits.hits[0]!, source: 'codex', title: '鸿蒙上架' }],
+    }
+    const text = renderSessiongraph({ query: '广告' }, mixed, OPTIONS)
+
+    expect(text).toContain('[codex]')
+    expect(text).toContain('不是本机 DSH 会话')
+    expect(text).toContain('~/.codex')
+  })
+
+  it('stays quiet when every hit is a DSH session', () => {
+    const text = renderSessiongraph({ query: '广告' }, hits, OPTIONS)
+
+    expect(text).not.toContain('不是本机 DSH 会话')
   })
 
   it('names a hit that never got a title instead of leaving a blank', () => {

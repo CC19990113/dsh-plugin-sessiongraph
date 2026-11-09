@@ -104,9 +104,17 @@ The dropdown decides which session tools the model sees:
 
 **The tool-set switch is immediate, no restart.** It works through the host's `agent.ctx.tools.restrict({ deny })` (a per-agent restriction — a hidden tool's schema never enters the request) plus a per-agent system-prompt override.
 
-**"同步 Codex 的历史会话" is one checkbox that saves the moment it moves** — a boolean should not need a second confirmation button, and a failed save flips the switch back. It decides whether the Codex source from the section above is part of the corpus. It is not the same kind of setting as the dropdown: the dropdown changes *which tools the model sees* (immediate), while this changes *which conversations are in the index* (**effective on the next index run**, because that is when the indexer reads it). Turning it off drops those rows on the next run; it never touches a file under `~/.codex`.
+**"同步 Codex 的历史会话" is one checkbox that shares the one save button with the dropdown above** — a save writes the whole `panel.json`, both choices together. It decides whether the Codex source from the section above is part of the corpus. It is not the same kind of setting as the dropdown: the dropdown changes *which tools the model sees* (immediate), while this changes *which conversations are in the index* (**effective on the next index run**, because that is when the indexer reads it). Turning it off drops those rows on the next run; it never touches a file under `~/.codex`.
 
 Both choices land in `<indexRoot>/panel.json` and are read back on start. A document without `codexSync` — or a corrupt one — falls back to the configured `codex`, so the panel is never the only source of truth: only a value a human actually saved is authoritative.
+
+### Spotting a Codex session in an answer
+
+Any answer that mentions one prefixes the line with `[codex]` and appends a note:
+
+> 注：标 [codex] 的会话来自 OpenAI Codex（`~/.codex` 下的 rollout 日志），不是本机 DSH 会话 —— DSH 侧边栏里找不到它，也没有能跳转的本机会话 id。正文可以用 session / event 读，要接着聊得去 Codex 那边。
+
+That is not decoration: a Codex conversation has no entry in this host, so naming it as "session <id>" without the note sends the user looking for something that does not exist. It is absent when every session in the answer is DSH's own.
 
 ### Query engines
 

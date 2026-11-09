@@ -255,30 +255,29 @@ describe('the settings panel client', () => {
     expect(box?.props.checked).toBe(true)
   })
 
-  it('saves the Codex choice as soon as the switch moves', async () => {
-    // A switch that needs a second button press is a switch the user will not save: moving it must
-    // be the act, not a draft. The dropdown keeps its explicit save because choosing then confirming
-    // is what a select means.
+  it('saves both choices with the one save button', async () => {
+    // One POST writes the whole document, so both controls are drafts until the same button is
+    // pressed: moving the switch must not send anything on its own.
     const client = load()
     const tree = await choose(client, 'sessiongraph')
     const box = find(tree, 'input')
     ;(box?.props.onChange as (event: { target: { checked: boolean } }) => void)({ target: { checked: false } })
-    await settle()
+    expect(client.calls.filter(call => call.init?.method === 'POST')).toHaveLength(0)
+
+    const button = saveButton(mount(client))
+    await (button?.props.onClick as () => Promise<void>)()
 
     const post = client.calls.find(call => call.init?.method === 'POST')
     expect(JSON.parse(post?.init?.body ?? '{}')).toEqual({ toolSet: 'sessiongraph', codexSync: false })
   })
 
-  it('flips the switch back when the save fails', async () => {
-    const client = load({ failSave: true })
+  it('shows the unsaved notice once either control differs', async () => {
+    const client = load()
     const tree = await choose(client, 'sessiongraph')
     const box = find(tree, 'input')
     ;(box?.props.onChange as (event: { target: { checked: boolean } }) => void)({ target: { checked: false } })
-    await settle()
-
-    // Optimistic update, then an honest rollback: the panel must show the value that is actually on
-    // disk, not the one the user wished for.
-    expect((find(mount(client), 'input'))?.props.checked).toBe(true)
+    const texts = findAll(mount(client), 'div').flatMap(node => node.children).filter(child => typeof child === 'string')
+    expect(texts).toContain('有未保存的改动。')
   })
 
   it('posts the chosen value when 保存 is pressed', async () => {

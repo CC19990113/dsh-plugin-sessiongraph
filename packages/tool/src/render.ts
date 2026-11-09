@@ -219,7 +219,53 @@ export function renderSessiongraph(
   options: RenderOptions,
 ): string {
   const text = renderValue(args, value, options)
-  return isStale(value) ? `${text}\n${STALE_NOTE}` : text
+  const notes: string[] = []
+  if (foreignSources(value).has('codex')) notes.push(FOREIGN_SOURCE_NOTE)
+  if (isStale(value)) notes.push(STALE_NOTE)
+  return notes.length === 0 ? text : `${text}\n${notes.join('\n')}`
+}
+
+/**
+ * What a reader has to know before acting on a Codex row.
+ *
+ * An index holds two harnesses, and a conversation that exists only as a Codex rollout is not a
+ * DSH session: it has no entry in the host's sidebar and no DSH session id to jump to. Without the
+ * note, "I found it in session <id>" sends the user looking for something that is not there — so the
+ * note says where the bytes actually are.
+ */
+const FOREIGN_SOURCE_NOTE =
+  '注：标 [codex] 的会话来自 OpenAI Codex（~/.codex 下的 rollout 日志），不是本机 DSH 会话 —— '
+  + 'DSH 侧边栏里找不到它，也没有能跳转的本机会话 id。正文可以用 session / event 读，'
+  + '要接着聊得去 Codex 那边。'
+
+/**
+ * Every session source one answer mentions.
+ *
+ * `workspaces`, `status` and `index` answer about the index itself rather than about conversations,
+ * so they contribute nothing: a note there would describe rows the answer never showed.
+ * @param value - the canonical value the operation returned.
+ * @returns the distinct sources it named.
+ */
+function foreignSources(value: SessiongraphToolValue): ReadonlySet<string> {
+  switch (value.operation) {
+    case 'search':
+      return new Set(value.hits.map(hit => hit.source))
+    case 'session':
+    case 'event':
+      return new Set([value.session.source])
+    case 'timeline':
+      return new Set(value.sessions.map(session => session.source))
+    case 'trace':
+      return value.kind === 'event'
+        ? new Set([value.session.source])
+        : new Set([
+            value.target.source,
+            ...value.ancestors.map(ancestor => ancestor.source),
+            ...value.descendants.map(node => node.session.source),
+          ])
+    default:
+      return new Set()
+  }
 }
 
 /**
