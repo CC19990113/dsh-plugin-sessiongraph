@@ -108,10 +108,15 @@ function load(): LoadedClient {
     fetch: async (url: string, init?: FetchCall['init']) => {
       calls.push({ url, init })
       // The save route echoes the choice it was given; the read route answers the default.
-      const asked = init?.body === undefined ? null : (JSON.parse(init.body) as { toolSet?: string }).toolSet
-      const body = asked === null
-        ? { ok: true, toolSet: 'sessiongraph', available: { kernel: ['session_search'], sessiongraph: true } }
-        : { ok: true, toolSet: asked, available: { kernel: ['session_search'], sessiongraph: true } }
+      const sent = init?.body === undefined ? null : (JSON.parse(init.body) as { toolSet?: string; codexSync?: boolean })
+      const body = sent === null
+        ? { ok: true, toolSet: 'sessiongraph', codexSync: true, available: { kernel: ['session_search'], sessiongraph: true } }
+        : {
+            ok: true,
+            toolSet: sent.toolSet,
+            codexSync: sent.codexSync !== false,
+            available: { kernel: ['session_search'], sessiongraph: true },
+          }
       return { ok: true, status: 200, async json() { return body } }
     },
   }
@@ -234,6 +239,31 @@ describe('the settings panel client', () => {
     expect(client.calls[0]?.init?.method ?? 'GET').toBe('GET')
   })
 
+  it('renders the Codex switch checked by default', async () => {
+    // The host answers with the value the next index run would use; a panel that invented `false`
+    // here would show a corpus smaller than the one the indexer actually builds.
+    const client = load()
+    mount(client)
+    await settle()
+    const tree = mount(client)
+    const box = find(tree, 'input')
+    expect(box).toBeDefined()
+    expect(box?.props.type).toBe('checkbox')
+    expect(box?.props.checked).toBe(true)
+  })
+
+  it('posts the Codex choice alongside the tool set', async () => {
+    const client = load()
+    const tree = await choose(client, 'sessiongraph')
+    const box = find(tree, 'input')
+    ;(box?.props.onChange as (event: { target: { checked: boolean } }) => void)({ target: { checked: false } })
+    const button = saveButton(mount(client))
+    await (button?.props.onClick as () => Promise<void>)()
+
+    const post = client.calls.find(call => call.init?.method === 'POST')
+    expect(JSON.parse(post?.init?.body ?? '{}')).toEqual({ toolSet: 'sessiongraph', codexSync: false })
+  })
+
   it('posts the chosen value when 保存 is pressed', async () => {
     const client = load()
     const button = saveButton(await choose(client, 'kernel'))
@@ -241,6 +271,6 @@ describe('the settings panel client', () => {
     await (button?.props.onClick as () => Promise<void>)()
     const post = client.calls.find(call => call.init?.method === 'POST')
     expect(post?.url).toBe(API + '/tools')
-    expect(JSON.parse(post?.init?.body ?? '{}')).toEqual({ toolSet: 'kernel' })
+    expect(JSON.parse(post?.init?.body ?? '{}')).toEqual({ toolSet: 'kernel', codexSync: true })
   })
 })

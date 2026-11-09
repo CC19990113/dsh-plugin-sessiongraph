@@ -47,7 +47,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { loadNative } from 'dsh-plugin-sessiongraph-native'
 import type { NativeIndexReport, NativeKernel } from 'dsh-plugin-sessiongraph-native'
-import { INDEX_RELATIVE_PATH, SessiongraphIndexerId } from 'dsh-plugin-sessiongraph-service'
+import {
+  INDEX_RELATIVE_PATH,
+  PANEL_CODEX_SYNC_KEY,
+  PANEL_FILE_NAME,
+  SessiongraphIndexerId,
+} from 'dsh-plugin-sessiongraph-service'
 import type {
   SessiongraphIndexer,
   SessiongraphIndexOptions,
@@ -577,7 +582,7 @@ async function startBackgroundIndex(
     if (jobs === undefined) return undefined
     // Asked last, so a composition without a registry never pays for the store scan below. The
     // source count is the run's real size; the sidecar only describes what the last run saw.
-    if ((await countSessionFiles(config)) < config.backgroundIndexThreshold) return undefined
+    if ((await countSessionFiles(config, indexRoot)) < config.backgroundIndexThreshold) return undefined
     return jobs.start({
       owner,
       kind: AUTO_INDEX_JOB_KIND,
@@ -631,15 +636,16 @@ function indexJobOwner(options: SessiongraphIndexOptions): string | undefined {
 }
 
 /**
- * Count the session logs an index run would read, across every configured source.
+ * Count the session logs an index run would read, across every enabled source.
  * @param config - resolved plugin configuration.
+ * @param indexRoot - directory holding the index, which decides whether Codex is enabled.
  * @returns the number of logs, or zero when a store cannot be listed.
  */
-async function countSessionFiles(config: ResolvedConfig): Promise<number> {
+async function countSessionFiles(config: ResolvedConfig, indexRoot: string): Promise<number> {
   try {
     const [harness, codex] = await Promise.all([
       scanSessions(config.sessionsRoot),
-      config.codex ? scanCodexSessions(config.codexRoot) : Promise.resolve<SessionFile[]>([]),
+      codexEnabled(indexRoot, config) ? scanCodexSessions(config.codexRoot) : Promise.resolve<SessionFile[]>([]),
     ])
     return harness.length + codex.length
   } catch {
@@ -968,7 +974,8 @@ async function runIndexUnlocked(
   // The kernel indexes DSH's own logs only — it has no Codex reader — so a run that must include
   // Codex's history takes the TypeScript path. Silently answering half the corpus would be worse than
   // the slower engine, and a user who pinned `native` deserves to know why it did not run.
-  const codexPending = config.codex && (await scanCodexSessions(config.codexRoot)).length > 0
+  const codexOn = codexEnabled(indexRoot, config)
+  const codexPending = codexOn && (await scanCodexSessions(config.codexRoot)).length > 0
   const native = codexPending ? undefined : resolveNativeEngine(config.engine)
   if (native !== undefined) {
     const nativeReport = await runNativeEngine(native, indexPath, options, config, inScope, ctx, signal, startedAt)
@@ -987,7 +994,7 @@ async function runIndexUnlocked(
   // contribution, and the scan is cheap next to the parse that follows it.
   const [harnessFiles, codexFiles] = await Promise.all([
     scanSessions(config.sessionsRoot),
-    config.codex ? scanCodexSessions(config.codexRoot) : Promise.resolve<SessionFile[]>([]),
+    codexOn ? scanCodexSessions(config.codexRoot) : Promise.resolve<SessionFile[]>([]),
   ])
   signal?.throwIfAborted()
   const codexTitles = codexFiles.length === 0 ? undefined : await readCodexTitles(config.codexRoot)
@@ -1124,6 +1131,35 @@ export function matchesWorkspace(filter: string | undefined, workspace: string):
 export function matchesSession(filter: string | undefined, id: string): boolean {
   if (filter === undefined) return true
   return id === filter || id.startsWith(filter)
+}
+
+/**
+ * Whether this run should index Codex's history.
+ *
+ * The settings panel stores its choice in `<indexRoot>/panel.json`, and that file — not the plugin
+ * configuration — is where a human's deviation lives. Reading it on every run is what makes the
+ * panel switch take effect on the next index without a restart, and what keeps the stored choice
+ * authoritative across one. A missing or unreadable file falls back to the configured value: a broken
+ * panel must never decide the corpus on its own.
+ * @param indexRoot - directory holding the index whose panel file is read.
+ * @param config - resolved plugin configuration, used when nothing was saved.
+ * @returns whether Codex logs are part of this run.
+ */
+function codexEnabled(indexRoot: string, config: ResolvedConfig): boolean {
+  let text: string
+  try {
+    text = readFileSync(join(indexRoot, PANEL_FILE_NAME), 'utf8')
+  } catch {
+    return config.codex
+  }
+  try {
+    const parsed: unknown = JSON.parse(text)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return config.codex
+    const value = (parsed as Record<string, unknown>)[PANEL_CODEX_SYNC_KEY]
+    return typeof value === 'boolean' ? value : config.codex
+  } catch {
+    return config.codex
+  }
 }
 
 /**

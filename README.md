@@ -90,9 +90,11 @@ Tool parameters are **snake_case** (`session_id`, `window_before`, `dedupe_by_se
 
 Ranking is `bm25 / weight` with `user 1.0 / title 1.1 / assistant 1.2 / tool 1.5`. FTS5's bm25 is negative, so **dividing** by the weight demotes — multiplying would push tool calls to the top.
 
-### Settings: which session tools the model sees
+### Settings: which session tools the model sees, and whether Codex joins
 
-Settings → **会话检索** (Session search), a three-way dropdown:
+Settings → **会话检索** (Session search): a three-way dropdown plus one Codex switch.
+
+The dropdown decides which session tools the model sees:
 
 | Choice | Effect |
 |---|---|
@@ -100,7 +102,11 @@ Settings → **会话检索** (Session search), a three-way dropdown:
 | `kernel` | The reverse: hides `sessiongraph`, keeps the host's five |
 | `both` | Exposes both. The model may check the same thing twice, and it costs more context |
 
-Switching is **immediate, no restart**. It works through the host's `agent.ctx.tools.restrict({ deny })` (a per-agent restriction — a hidden tool's schema never enters the request) plus a per-agent system-prompt override. The choice lands in `<indexRoot>/panel.json` and is read back on start.
+**The tool-set switch is immediate, no restart.** It works through the host's `agent.ctx.tools.restrict({ deny })` (a per-agent restriction — a hidden tool's schema never enters the request) plus a per-agent system-prompt override.
+
+**"同步 Codex 的历史会话" is one checkbox** that decides whether the Codex source from the section above is part of the corpus. It is not the same kind of setting as the dropdown: the dropdown changes *which tools the model sees* (immediate), while this changes *which conversations are in the index* (**effective on the next index run**, because that is when the indexer reads it). Turning it off drops those rows on the next run; it never touches a file under `~/.codex`.
+
+Both choices land in `<indexRoot>/panel.json` and are read back on start. A document without `codexSync` — or a corrupt one — falls back to the configured `codex`, so the panel is never the only source of truth: only a value a human actually saved is authoritative.
 
 ### Query engines
 

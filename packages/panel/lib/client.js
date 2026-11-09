@@ -5,9 +5,15 @@
  * CJS factory 包装，靠宿主注入的 require 取 react，不引任何 npm 包（没有构建步骤、也没有
  * import 语句）。
  *
- * 这一个 tab 只做一件事：在 `sessiongraph` / `kernel` / `both` 之间切换「哪些会话检索工具
- * 对模型可见」。数据全走同源 `/dsh-plugin-sessiongraph/api/tools`，无 token、无轮询——
- * 值只有用户点「保存」时才会变。
+ * 这个 tab 管两件互不相干的事：
+ *
+ * 1. 在 `sessiongraph` / `kernel` / `both` 之间切换「哪些会话检索工具对模型可见」——存进
+ *    `panel.json` 后由宿主侧立刻改工具表。
+ * 2. 开关「是否把 Codex 的历史会话也纳入索引」——同一个文件里的 `codexSync`，由**索引器**
+ *    在下次运行时读取（本包不持有索引器配置，所以这里只写文件、只负责显示）。
+ *
+ * 数据全走同源 `/dsh-plugin-sessiongraph/api/tools`，无 token、无轮询——值只有用户点「保存」
+ * 时才会变。
  */
 window.__ModuleLoader__.load({
   id: "dsh-plugin-sessiongraph-panel",
@@ -62,6 +68,7 @@ window.__ModuleLoader__.load({
       h1: { margin: 0, fontSize: 14, fontWeight: 600, lineHeight: 1.5, whiteSpace: "nowrap" },
       hint: { color: C.tertiary, fontSize: 12 },
       row: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
+      checkRow: { display: "flex", alignItems: "center", gap: 6, cursor: "pointer" },
       label: { color: C.secondary, fontSize: 12, whiteSpace: "nowrap" },
       select: {
         boxSizing: "border-box",
@@ -154,6 +161,9 @@ window.__ModuleLoader__.load({
     function SessiongraphSection() {
       const [toolSet, setToolSet] = React.useState(null);
       const [draft, setDraft] = React.useState("sessiongraph");
+      /** 已保存的 Codex 开关；null 表示还没读到 */
+      const [codex, setCodex] = React.useState(null);
+      const [codexDraft, setCodexDraft] = React.useState(false);
       const [available, setAvailable] = React.useState(null);
       const [error, setError] = React.useState(null);
       const [notice, setNotice] = React.useState(null);
@@ -184,6 +194,11 @@ window.__ModuleLoader__.load({
         const current = knownToolSet(data.toolSet) || "sessiongraph";
         setToolSet(current);
         setDraft(current);
+        // 宿主没给这个字段就当作「跟随插件默认」——索引器的默认是开，所以缺省按 true。
+        // 反过来（缺省 false）会让一次只改工具集的保存顺手把 Codex 关掉，那是个静默的数据损失。
+        const codexNow = data.codexSync !== false;
+        setCodex(codexNow);
+        setCodexDraft(codexNow);
         setLoaded(true);
       }
 
@@ -195,7 +210,7 @@ window.__ModuleLoader__.load({
         const result = await call(API + "/tools", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ toolSet: draft }),
+          body: JSON.stringify({ toolSet: draft, codexSync: codexDraft }),
         });
         setBusy(null);
         if (!result.ok) {
@@ -204,13 +219,20 @@ window.__ModuleLoader__.load({
         }
         const data = result.data || {};
         const saved = knownToolSet(data.toolSet) || draft;
+        const savedCodex = data.codexSync === true;
         setToolSet(saved);
         setDraft(saved);
+        setCodex(savedCodex);
+        setCodexDraft(savedCodex);
         if (data.available) setAvailable(data.available);
-        setNotice("已保存：" + saved + "。新值对之后创建的会话立即生效，已在跑的会话在下一步重新读取工具表。");
+        setNotice(
+          "已保存：工具集 " + saved + "；Codex 历史" + (savedCodex ? "纳入索引" : "不纳入索引") + "。"
+            + "工具集对之后创建的会话立即生效，已在跑的会话在下一步重新读取工具表；"
+            + "Codex 开关在下次索引运行时生效（下一次自动刷新或手动建索引）。",
+        );
       }
 
-      const dirty = loaded && toolSet !== null && draft !== toolSet;
+      const dirty = loaded && (draft !== toolSet || codexDraft !== codex);
 
       const options = OPTIONS.map((option) =>
         h("option", { key: option.value, value: option.value }, option.label),
@@ -262,6 +284,34 @@ window.__ModuleLoader__.load({
         ),
       );
 
+      const codexBlock = h(
+        "div",
+        { style: S.block },
+        h(
+          "label",
+          { style: S.checkRow },
+          h("input", {
+            type: "checkbox",
+            checked: codexDraft === true,
+            disabled: busy === "save",
+            role: "switch",
+            "data-sessiongraph-codex": "",
+            onChange: (event) => {
+              setCodexDraft(event.target.checked === true);
+              setNotice(null);
+            },
+          }),
+          h("span", { style: S.label }, "同步 Codex 的历史会话"),
+        ),
+        h(
+          "div",
+          { style: S.hint },
+          "打开后，~/.codex 下的 rollout 日志会和 DSH 自己的会话一起进索引，"
+            + "用 source=codex 可以只看这一侧；关掉后下次索引运行会把这些行删掉。"
+            + "这个开关不会动你的 Codex 数据，只决定读不读。",
+        ),
+      );
+
       const notes = h(
         "div",
         { style: S.options },
@@ -280,6 +330,7 @@ window.__ModuleLoader__.load({
         "div",
         { style: S.root, "data-sessiongraph-panel": "" },
         header,
+        codexBlock,
         notes,
         status ? h("div", { style: S.mono }, status) : null,
         error ? h("div", { style: S.danger, role: "alert" }, error) : null,

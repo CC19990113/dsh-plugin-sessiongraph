@@ -25,6 +25,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
+import { PANEL_FILE_NAME } from 'dsh-plugin-sessiongraph-service'
 import type { ResolvedConfig } from './index.ts'
 import { describeSessionTools, getToolSet, normalizeToolSet, setToolSet } from './visibility.ts'
 import type { AvailableSessionTools, ToolSet } from './visibility.ts'
@@ -32,8 +33,19 @@ import type { AvailableSessionTools, ToolSet } from './visibility.ts'
 /** Path prefix every panel route lives under. The browser client hardcodes the same string. */
 export const PANEL_ROUTE_PREFIX = '/dsh-plugin-sessiongraph/api'
 
-/** Name of the settings file inside the index root. */
-export const PANEL_FILE_NAME = 'panel.json'
+// Re-exported so a consumer that already imports the panel surface keeps working; the constant
+// itself lives in the seam package because the indexer reads the same file.
+export { PANEL_FILE_NAME }
+
+/**
+ * What the panel shows for `codexSync` before anything was ever saved.
+ *
+ * Not read from a configuration member on purpose: `codex` is the **indexer's** option, and this
+ * package never loads that indexer — inventing a second `codex` config here would let the panel
+ * display one value while the run acts on another. `true` mirrors the indexer's own default, and the
+ * indexer is the authority once a value is saved (it reads this same file).
+ */
+const DEFAULT_CODEX_SYNC = true
 
 /**
  * Largest request body accepted by the save route, in bytes.
@@ -136,6 +148,13 @@ export interface PanelToolsResponse {
   readonly ok: true
   /** The choice now in effect. */
   readonly toolSet: ToolSet
+  /**
+   * Whether Codex history is part of the corpus.
+   *
+   * Reports the value the next index run will use, not merely what the file holds: an unsaved panel
+   * shows the configured default, which is what the indexer would act on right now.
+   */
+  readonly codexSync: boolean
   /** Which session tools this host actually registered. */
   readonly available: AvailableSessionTools
 }
@@ -163,6 +182,14 @@ interface RouteResult {
 interface PanelFile {
   /** The chosen session-tool set. */
   readonly toolSet: ToolSet
+  /**
+   * Whether Codex history should be indexed, when a human saved a deviation from the configuration.
+   *
+   * Absent means "follow the plugin config", which is what a panel nobody opened records. It is a
+   * whole-document rewrite on save, so this member must be carried over explicitly when the caller
+   * only changes `toolSet`.
+   */
+  readonly codexSync?: boolean
   /** When the choice was last saved, epoch milliseconds; diagnostics only. */
   readonly updatedAt: number
 }
@@ -250,7 +277,7 @@ async function handleRequest(ctx: Context, file: string, req: PanelRequest, res:
     const route = url.pathname.slice(PANEL_ROUTE_PREFIX.length).replace(/\/+$/u, '')
     const method = (req.method ?? 'GET').toUpperCase()
     if (route === '/tools' && method === 'GET') {
-      respond(res, currentResult(ctx))
+      respond(res, currentResult(ctx, file))
       return
     }
     if (route === '/tools' && method === 'POST') {
@@ -269,15 +296,25 @@ async function handleRequest(ctx: Context, file: string, req: PanelRequest, res:
 }
 
 /**
- * Build the `GET /tools` answer from live state rather than the file: a reload of the plugin can
- * have changed the effective choice without touching what is on disk.
+ * Build the `GET /tools` answer.
+ *
+ * `toolSet` comes from live state (a plugin reload can change the effective choice without touching
+ * the file), while `codexSync` comes from the file — the indexer reads that file on every run, so the
+ * file is the only thing that truthfully describes what the next run will do.
  * @param ctx - the plugin context.
- * @returns the current choice and the tools this host registered.
+ * @param file - absolute path of the persisted settings file.
+ * @returns the current choices and the tools this host registered.
  */
-function currentResult(ctx: Context): RouteResult {
+function currentResult(ctx: Context, file: string): RouteResult {
+  const persisted = readPanelFile(file)
   return {
     code: 200,
-    body: { ok: true, toolSet: getToolSet(ctx) ?? normalizeToolSet(undefined), available: describeSessionTools(ctx) },
+    body: {
+      ok: true,
+      toolSet: getToolSet(ctx) ?? normalizeToolSet(undefined),
+      codexSync: persisted?.codexSync ?? DEFAULT_CODEX_SYNC,
+      available: describeSessionTools(ctx),
+    },
   }
 }
 
@@ -298,14 +335,39 @@ async function saveResult(ctx: Context, file: string, req: PanelRequest): Promis
   if (toolSet === undefined) {
     return { code: 400, body: { ok: false, message: 'toolSet 必须是 sessiongraph、kernel 或 both 之一' } }
   }
-  const document: PanelFile = { toolSet, updatedAt: Date.now() }
+  const requestedCodex = booleanField(read.value, 'codexSync')
+  // A caller that changes only `toolSet` must not silently reset the Codex choice, so an absent
+  // field inherits whatever the file already records — and only an explicit boolean is written.
+  const existing = readPanelFile(file)
+  const codexSync = requestedCodex ?? existing?.codexSync
+  const document: PanelFile = {
+    toolSet,
+    ...(codexSync === undefined ? {} : { codexSync }),
+    updatedAt: Date.now(),
+  }
   const written = await writePanelFile(ctx, file, document)
   if (!written) return { code: 500, body: { ok: false, message: `无法写入 ${file}` } }
   setToolSet(ctx, toolSet)
   return {
     code: 200,
-    body: { ok: true, toolSet, available: describeSessionTools(ctx) },
+    body: {
+      ok: true,
+      toolSet,
+      codexSync: codexSync ?? DEFAULT_CODEX_SYNC,
+      available: describeSessionTools(ctx),
+    },
   }
+}
+
+/**
+ * The `codexSync` member of a parsed document, when it is a boolean.
+ * @param body - whatever `JSON.parse` produced.
+ * @returns the value, or `undefined` when the member is absent or not a boolean.
+ */
+function booleanField(body: unknown, key: string): boolean | undefined {
+  if (typeof body !== 'object' || body === null) return undefined
+  const value = (body as Record<string, unknown>)[key]
+  return typeof value === 'boolean' ? value : undefined
 }
 
 /**
@@ -341,7 +403,12 @@ function readPanelFile(file: string): PanelFile | undefined {
     const toolSet = toolSetField(parsed)
     if (toolSet === undefined) return undefined
     const updatedAt = (parsed as Record<string, unknown>).updatedAt
-    return { toolSet, updatedAt: typeof updatedAt === 'number' ? updatedAt : 0 }
+    const codexSync = booleanField(parsed, 'codexSync')
+    return {
+      toolSet,
+      ...(codexSync === undefined ? {} : { codexSync }),
+      updatedAt: typeof updatedAt === 'number' ? updatedAt : 0,
+    }
   } catch {
     return undefined
   }

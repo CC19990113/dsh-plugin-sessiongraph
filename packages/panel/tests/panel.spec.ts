@@ -246,6 +246,47 @@ describe('applyPanel', () => {
     expect(again.json).toMatchObject({ ok: true, toolSet: 'kernel' })
   })
 
+  it('answers codexSync as the indexer default before anything is saved', async () => {
+    const root = tempRoot()
+    const panel = harness({ root })
+    applyVisibility(panel.ctx, config(root, 'sessiongraph'))
+    applyPanel(panel.ctx, config(root, 'sessiongraph'))
+
+    // Nothing saved means "follow the plugin config", whose default is on. The panel must report the
+    // value the next index run would act on, not the absence of a stored choice.
+    const answer = await panel.handler('GET', '/tools')
+    expect(answer.json).toMatchObject({ ok: true, codexSync: true })
+  })
+
+  it('persists the codex choice and answers it back', async () => {
+    const root = tempRoot()
+    const panel = harness({ root })
+    applyVisibility(panel.ctx, config(root, 'sessiongraph'))
+    applyPanel(panel.ctx, config(root, 'sessiongraph'))
+
+    const saved = await panel.handler('POST', '/tools', { toolSet: 'kernel', codexSync: false })
+    expect(saved.code).toBe(200)
+    expect(saved.json).toMatchObject({ ok: true, toolSet: 'kernel', codexSync: false })
+
+    const file = JSON.parse(readFileSync(join(root, PANEL_FILE_NAME), 'utf8')) as Record<string, unknown>
+    expect(file.codexSync).toBe(false)
+    expect((await panel.handler('GET', '/tools')).json).toMatchObject({ toolSet: 'kernel', codexSync: false })
+  })
+
+  it('keeps a saved codex choice when a later save only names the tool set', async () => {
+    const root = tempRoot()
+    const panel = harness({ root })
+    applyVisibility(panel.ctx, config(root, 'sessiongraph'))
+    applyPanel(panel.ctx, config(root, 'sessiongraph'))
+
+    await panel.handler('POST', '/tools', { toolSet: 'sessiongraph', codexSync: true })
+    // A client that predates the switch, or a partial caller: the untouched member must survive the
+    // whole-document rewrite rather than silently reverting to the default.
+    const second = await panel.handler('POST', '/tools', { toolSet: 'kernel' })
+    expect(second.json).toMatchObject({ toolSet: 'kernel', codexSync: true })
+    expect((await panel.handler('GET', '/tools')).json).toMatchObject({ codexSync: true })
+  })
+
   it('applies the persisted choice on the next load', async () => {
     const root = tempRoot()
     const first = harness({ root })

@@ -45,6 +45,7 @@ export {
   SCHEMA_VERSION,
   SESSION_TABLE,
 } from './schema.ts'
+export { PANEL_CODEX_SYNC_KEY, PANEL_FILE_NAME } from './panel.ts'
 export { highlightTerms, isCjk, matchExpression, tokenize } from './tokenize.ts'
 export { SessiongraphError } from './types.ts'
 export type {
