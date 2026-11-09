@@ -1,12 +1,18 @@
 packages:
   - 'packages/*'
-# 发版窗口期的临时豁免：pnpm 11 的 minimumReleaseAge（1440 分钟）会把刚发布的平台包
-# 判为「太新」，连 lockfile 校验阶段都拒收。这里只写包名（不带版本）—— 实测带版本的
-# 形式对 lockfile 校验不生效，而 release-prepare.mjs 写的就是带版本的。等 24 小时窗口
-# 过去后可以把这几行去掉。
+# 发版窗口期的临时豁免：pnpm 11 的 minimumReleaseAge（1440 分钟）把刚发布的平台包判为
+# 「太新」，连 lockfile 校验阶段都会拒收。裸包名与 name@version 两种形式都要写：
+#   - 裸包名      → pnpm 对 lockfile 条目的策略校验认这个
+#   - name@version→ scripts/check-release-versions.mjs 认这个（它还要求记录本次发布的版本）
+# 等 24 小时窗口过去后这一整段都可以删。
 minimumReleaseAgeExclude:
   - dsh-plugin-sessiongraph-indexer-darwin-arm64
   - dsh-plugin-sessiongraph-indexer-darwin-x64
   - dsh-plugin-sessiongraph-indexer-linux-arm64-gnu
   - dsh-plugin-sessiongraph-indexer-linux-x64-gnu
   - dsh-plugin-sessiongraph-indexer-win32-x64-msvc
+  - dsh-plugin-sessiongraph-indexer-darwin-arm64@0.3.1
+  - dsh-plugin-sessiongraph-indexer-darwin-x64@0.3.1
+  - dsh-plugin-sessiongraph-indexer-linux-arm64-gnu@0.3.1
+  - dsh-plugin-sessiongraph-indexer-linux-x64-gnu@0.3.1
+  - dsh-plugin-sessiongraph-indexer-win32-x64-msvc@0.3.1
