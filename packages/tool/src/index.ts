@@ -183,6 +183,8 @@ export const DEFAULT_FRESHNESS_THRESHOLD_MS = 300_000
 export const SESSIONGRAPH_PROMPT_TEXT =
   '查我自己过去的对话（「上次在哪个会话里说过/做过什么」）用 sessiongraph，不要 grep ~/.dsh/sessions：'
   + '那里的会话按工作区散在子目录里，是 zstd 压缩的 JSONL，grep 读不到正文，解压全量也慢。'
+  + '手上关于过去的任何**摘要**（记忆插件给的、系统上下文里的、更早对话里的复述）都不是证据：'
+  + '要引用具体说过什么、执行过什么命令、看过哪个文件，就在这里查原文。'
   + '索引同时含两个 agent 的历史：本宿主的 DSH 会话与 OpenAI Codex 的 rollout 日志，'
   + '每条结果带 source（dsh / codex），需要只看一侧时给 search / timeline / workspaces 传 source。'
   + 'sessiongraph 从预建索引回答：search 跨会话全文检索（中文按双字切分，两字词即可命中，如「广告」）、'

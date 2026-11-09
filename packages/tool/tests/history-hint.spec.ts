@@ -95,6 +95,14 @@ describe('looksLikeHistoryQuestion', () => {
     expect(looksLikeHistoryQuestion('这个接口昨天调通了吗')).toBe(true)
   })
 
+  it('treats "carry on with that" as a question about the past', () => {
+    // "继续" alone is ambiguous, but "继续做/接着上次" is exactly the moment a summary gets mistaken
+    // for the work itself: the model needs the original conversation to know what to carry on with.
+    expect(looksLikeHistoryQuestion('继续做那个鸿蒙的事')).toBe(true)
+    expect(looksLikeHistoryQuestion('接着上次的发版往下弄')).toBe(true)
+    expect(looksLikeHistoryQuestion('按上次那样再跑一遍')).toBe(true)
+  })
+
   it('leaves ordinary work requests alone', () => {
     expect(looksLikeHistoryQuestion('把这个按钮颜色改成蓝色')).toBe(false)
     expect(looksLikeHistoryQuestion('跑一下测试')).toBe(false)
@@ -140,6 +148,22 @@ describe('the pre-step hook', () => {
     expect(decision.kind).toBe('enter')
     expect(decision.messages).toHaveLength(2)
     expect((decision.messages[1] as HistoryHintMessage).source.kind).toBe(HISTORY_HINT_SOURCE_KIND)
+  })
+
+  it('calls a summary a summary without naming any memory provider', async () => {
+    // The wording has to hold on a machine with no recall plugin at all, so it may not name one or
+    // key off its storage format. What it must say is the part that is true everywhere: a summary is
+    // not evidence.
+    const { listener } = mountOneAgent()
+    const decision = await enter(listener, [userMessage('上次发版到哪个版本了')])
+    const appended = decision.messages.at(-1) as { content: { text: string }[] }
+    const text = appended.content[0]?.text ?? ''
+
+    expect(text).toContain('摘要')
+    expect(text).toContain('不是原文')
+    expect(text).toContain('sessiongraph')
+    // No provider may be named, and no provider's URI scheme may be baked into the advice.
+    expect(text).not.toMatch(/openviking|viking:/i)
   })
 
   it('says nothing for an ordinary request', async () => {
