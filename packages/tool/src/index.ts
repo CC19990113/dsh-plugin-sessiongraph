@@ -549,6 +549,7 @@ export function buildRequest(
         indexRoot,
         query: required(args, 'query', 'search'),
         ...(args.workspace === undefined ? {} : { workspace: args.workspace }),
+        ...(args.source === undefined ? {} : { source: args.source }),
         ...(args.after === undefined ? {} : { after: timestamp('after', args.after) }),
         ...(args.before === undefined ? {} : { before: timestamp('before', args.before) }),
         ...(args.kinds === undefined || args.kinds.length === 0 ? {} : { kinds: args.kinds }),
@@ -596,6 +597,7 @@ export function buildRequest(
         operation: 'timeline',
         indexRoot,
         ...(args.workspace === undefined ? {} : { workspace: args.workspace }),
+        ...(args.source === undefined ? {} : { source: args.source }),
         ...(args.after === undefined ? {} : { after: timestamp('after', args.after) }),
         ...(args.before === undefined ? {} : { before: timestamp('before', args.before) }),
         limit: bounded(args.limit, SESSIONGRAPH_DEFAULT_LIMITS.timeline, maxLimit),
@@ -605,6 +607,7 @@ export function buildRequest(
       return {
         operation: 'workspaces',
         indexRoot,
+        ...(args.source === undefined ? {} : { source: args.source }),
         limit: bounded(args.limit, SESSIONGRAPH_DEFAULT_LIMITS.workspaces, maxLimit),
         ...(offset === undefined ? {} : { offset }),
       }
@@ -1030,6 +1033,7 @@ function projectSearch(result: SessiongraphSearchResult, stale: boolean): Sessio
     operation: 'search',
     hits: result.hits.map(hit => ({
       session_id: hit.sessionId,
+      source: hit.source,
       ...(hit.title === undefined ? {} : { title: hit.title }),
       workspace: hit.workspace,
       time: hit.time,
@@ -1218,6 +1222,7 @@ function projectStatus(result: SessiongraphStatusResult): SessiongraphValueFor<'
 function projectSummary(summary: SessiongraphSessionSummary): SessiongraphValueFor<'session'>['session'] {
   return {
     session_id: summary.sessionId,
+    source: summary.source,
     ...(summary.title === undefined ? {} : { title: summary.title }),
     workspace: summary.workspace,
     created_at: summary.createdAt,

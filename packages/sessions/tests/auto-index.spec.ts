@@ -45,6 +45,8 @@ function config(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     autoBuild: true,
     maxLiveSessions: 8,
     engine: 'typescript',
+    codex: false,
+    codexRoot: join(fixture.work, 'codex'),
     ...overrides,
   }
 }

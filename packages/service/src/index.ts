@@ -72,6 +72,7 @@ export type {
   SessiongraphSessionResult,
   SessiongraphSessionSummary,
   SessiongraphSessionTraceResult,
+  SessiongraphSource,
   SessiongraphStatusRequest,
   SessiongraphStatusResult,
   SessiongraphStoreProvider,
@@ -84,7 +85,7 @@ export type {
   SessiongraphWorkspacesRequest,
   SessiongraphWorkspacesResult,
 } from './types.ts'
-export { SESSIONGRAPH_ENTRY_KINDS, SESSIONGRAPH_OPERATIONS } from './types.ts'
+export { SESSIONGRAPH_ENTRY_KINDS, SESSIONGRAPH_OPERATIONS, SESSIONGRAPH_SOURCES } from './types.ts'
 
 /**
  * `ctx.sessiongraph`. Holds the store and indexer reservations; selection reads them per call so a

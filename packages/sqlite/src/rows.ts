@@ -12,6 +12,7 @@
 
 import {
   SESSIONGRAPH_ENTRY_KINDS,
+  SESSIONGRAPH_SOURCES,
   SessiongraphError,
   SessiongraphSessionId,
 } from 'dsh-plugin-sessiongraph-service'
@@ -22,6 +23,7 @@ import type {
   SessiongraphRawEvent,
   SessiongraphRawEventSummary,
   SessiongraphSessionSummary,
+  SessiongraphSource,
   SessiongraphWorkspaceStat,
 } from 'dsh-plugin-sessiongraph-service'
 import type { RawSessionEvent } from 'dsh-plugin-sessiongraph-sessions'
@@ -114,6 +116,24 @@ function entryKind(row: IndexRow, what: string): SessiongraphEntryKind {
 }
 
 /**
+ * Read a session's source column, refusing a value this build does not know.
+ *
+ * A closed set rather than free text: the column names which harness wrote the log, and a value that
+ * is not in the seam's list means the file was written by an indexer this store cannot interpret —
+ * the same class of problem a schema-version mismatch is, so it fails the same way.
+ * @param row - the raw row.
+ * @param what - the record being built, for the failure message.
+ * @returns the validated source.
+ */
+function source(row: IndexRow, what: string): SessiongraphSource {
+  const value = text(row, 'source', what)
+  if (!(SESSIONGRAPH_SOURCES as readonly string[]).includes(value)) {
+    throw new SessiongraphError(`${what} has an unknown source "${value}"`, 'SESSIONGRAPH_CORRUPT')
+  }
+  return value as SessiongraphSource
+}
+
+/**
  * Build a {@link SessiongraphSessionSummary} from a `session` row.
  * @param row - the raw row, selected with every column the summary reads.
  * @returns the validated session record.
@@ -128,6 +148,7 @@ export function toSessionSummary(row: IndexRow): SessiongraphSessionSummary {
   const agentPreset = optionalText(row, 'agent_preset', named)
   return {
     sessionId: SessiongraphSessionId(id),
+    source: source(row, named),
     title,
     workspace: text(row, 'workspace', named),
     createdAt: integer(row, 'created_at', named),
@@ -168,6 +189,7 @@ export function toHitSubject(row: IndexRow): Omit<SessiongraphHit, 'snippet' | '
   const what = 'a search hit'
   return {
     sessionId: SessiongraphSessionId(text(row, 'session_id', what)),
+    source: source(row, what),
     title: optionalText(row, 'title', what),
     workspace: text(row, 'workspace', what),
     time: integer(row, 'time', what),

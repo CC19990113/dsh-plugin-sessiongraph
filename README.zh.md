@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-把本机全部 DSH 会话历史当成一个可检索的库 —— 模型用工具秒查「上次在哪个会话里说过、做过什么」，不用翻侧边栏，也不用 grep 压缩日志。
+把本机全部 DSH **和 Codex** 的会话历史当成一个可检索的库 —— 模型用工具秒查「上次在哪个会话里说过、做过什么」，不用翻侧边栏，也不用 grep 压缩日志。
 
 ## 架构
 
@@ -12,7 +12,7 @@
 |---|---|
 | `service` | 定义 `ctx.sessiongraph` 缝隙：查询词汇、store/indexer 注册表、schema v1、中文 bigram 分词器 |
 | `sqlite` | 读 provider：从 `index.db` 回答七个查询，并在 native / TypeScript 两套引擎间路由 |
-| `sessions` | 写 provider：扫描会话日志 → 逐帧解压 → 抽取条目 → 写库（TypeScript 与 Rust 双引擎）；另有 `raw.ts` 回读未删节事件 |
+| `sessions` | 写 provider：扫描两个 harness（DSH 与 Codex）的会话日志 → 解压 → 抽取条目 → 写库；另有 `raw.ts` 回读未删节事件 |
 | `tool` | 消费者：**一个** `sessiongraph` 工具（八个 operation）+ `/sessiongraph` 命令 + 系统提示段 + 设置页 HTTP 路由 + 工具可见性 |
 | `native` | Rust 内核：索引写入（`indexSessions`）与查询（`query`），加载失败返回 `undefined`，绝不抛 |
 | `panel` | 纯浏览器半侧：设置页「会话检索」页签（`dsh.client`，宿主入口是空 apply） |
@@ -77,12 +77,12 @@
 
 | operation | 作用 |
 |---|---|
-| `search` | 跨会话全文检索，可按 `sessionId` / `workspace` / `after` / `before` / `kinds` 过滤；默认同一会话只留最强命中（`dedupeBySession: false` 关闭）；返回标题、工作区、时间、轮次、命中片段（`[词]` 高亮） |
+| `search` | 跨会话全文检索，可按 `sessionId` / `workspace` / `source` / `after` / `before` / `kinds` 过滤；默认同一会话只留最强命中（`dedupeBySession: false` 关闭）；返回来源、标题、工作区、时间、轮次、命中片段（`[词]` 高亮） |
 | `session` | 按完整 id 或唯一前缀打开一个会话：元信息 + 有序条目 + 子会话 |
 | `event` | 读**一条未删节的原始事件**（走源日志，不是索引里的裁剪文本），可带 `windowBefore` / `windowAfter` 前后窗口 |
 | `trace` | 无 `seq` → 会话血缘（祖先链 + 递归后代树）；有 `seq` → 该事件的替换链、遮蔽范围与引用源事件 |
-| `timeline` | 按时间列会话（可过滤工作区），新→旧 |
-| `workspaces` | 工作区清单与统计 |
+| `timeline` | 按时间列会话（可过滤工作区与 `source`），新→旧 |
+| `workspaces` | 工作区清单与统计，可按 `source` 只看一个 harness |
 | `status` | 索引自身状态；**唯一在无索引时也能回答的操作** |
 | `index` | 建或刷新索引，与查询共用 30s 工具预算；源文件 mtime+size 未变就跳过，会话攒到 1000+ 时转后台 job 并返回 jobId |
 
@@ -147,6 +147,25 @@
 ### 索引什么
 
 只收有价值的：`user/message`（仅 `source.kind === 'user'`，即人真正打的字）、`assistant/message` 的 `text` 块（`reasoning` 占 61% 字节，不收）、`tool/call` 的名字与参数、`session/title`。跳过 `tool/result` 正文、`request/header`、`step/*`、`job/*`。
+
+### 两个 harness，一份索引
+
+DSH 的日志和 OpenAI Codex 的 rollout 日志解析进**同一个库**，每行会话用 `session.source` 标明来源（`dsh` / `codex`）—— 问「这个仓库当初怎么定的」不应该取决于当时哪个 agent 在开。
+
+| | 位置 | 形状 |
+|---|---|---|
+| `dsh` | `~/.dsh/sessions/<escaped-cwd>/<id>/session.vN.jsonl.zstd` | 首行 header + 扁平事件 |
+| `codex` | `~/.codex/archived_sessions/*.jsonl.zst`（归档）与 `~/.codex/sessions/<yyyy>/<mm>/<dd>/`（活会话） | 信封 `{timestamp, ordinal, type, payload}` |
+
+Codex 侧的三条规则是踩过才定的：
+
+- **`developer` 角色不是人。** Codex 每轮把整套指令集塞进一条 `developer` message，收进去会让系统提示变成全库最匹配的文档。
+- **`user` 角色也不一定是人。** `<environment_context>`、`<user_instructions>`、`<permissions instructions>` 都走 `user` 角色；本机实测 1678 条 user 记录里有 251 条只有注入、没有人话。所以按标签剥掉，剥完为空就整条丢弃（一条记录可以既有环境块又跟真问题，整条丢会连问题一起丢）。
+- **标题不在日志里。** Codex 的 thread name 记在 `~/.codex/session_index.jsonl`，每轮索引读一次该文件补标题（本机 88 个会话里 34 个有）。
+
+索引的量级参考（本机）：Codex 88 会话 / 27752 条（user 1427、assistant 8222、tool 18069），DSH 764 会话 / 112562 条，合起来全量重建 27 秒、增量 274ms。
+
+**原生内核暂未覆盖 Codex**：Rust 只解析 DSH 日志。所以当 `codex` 打开且 `~/.codex` 里确实有日志时，那一次运行直接走 TypeScript 引擎（`engine: 'native'` 时在 stderr 说明原因），而不是悄悄丢掉一半语料。`codex: false` 关闭 Codex 采集，`codexRoot` 换个 Codex home。
 
 ### 中文为什么两字词能命中
 

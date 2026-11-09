@@ -129,10 +129,23 @@ function titled(title: string | undefined): string {
   return title === undefined || title.trim() === '' ? '（无标题）' : `《${title}》`
 }
 
+/**
+ * The harness a session came from, marked only when it is not this host's own.
+ *
+ * An index holds DSH's logs and Codex's rollout logs side by side. Prefixing every DSH line would be
+ * noise on a machine whose history is mostly DSH, while an unmarked Codex line reads as a
+ * conversation this harness cannot open — so the mark appears exactly where it changes the answer.
+ * @param source - the session's recorded source.
+ * @returns a bracketed tag plus a separator, or an empty string for `dsh`.
+ */
+function sourceTag(source: string): string {
+  return source === 'dsh' ? '' : `[${source}] `
+}
+
 /** One session as a single line: when it last spoke, its id, title, workspace, and size. */
 function sessionLine(session: SessiongraphValueFor<'session'>['session']): string {
-  return `${formatTime(session.last_at)} · session ${session.session_id} · ${titled(session.title)}`
-    + ` · ${session.workspace} · ${session.turns} 轮 / ${session.entries} 条`
+  return `${formatTime(session.last_at)} · ${sourceTag(session.source)}session ${session.session_id}`
+    + ` · ${titled(session.title)} · ${session.workspace} · ${session.turns} 轮 / ${session.entries} 条`
 }
 
 /** One event summary as a single line. */
@@ -178,7 +191,7 @@ function hitLines(hit: Extract<SessiongraphToolValue, { operation: 'search' }>['
   const turn = hit.turn === undefined ? '' : ` · 第 ${hit.turn} 轮`
   return [
     `${formatTime(hit.time)} · [${hit.kind}] · ${titled(hit.title)}`,
-    `  ${hit.workspace} · session ${hit.session_id} #${hit.seq}${turn}`,
+    `  ${hit.workspace} · ${sourceTag(hit.source)}session ${hit.session_id} #${hit.seq}${turn}`,
     `  ${clipText(hit.snippet, maxChars)}`,
   ]
 }

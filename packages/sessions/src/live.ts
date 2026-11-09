@@ -113,6 +113,8 @@ export async function collectLiveSessions(
     const session = parseSessionEvents(record?.session, events, candidate.id, options.limits)
     sessions.push({
       session,
+      // A live session is the host's own in-memory conversation, so it is always this harness's.
+      source: 'dsh',
       sourcePath: liveSourcePath(candidate.id),
       // No version to compare: the live row is rebuilt every run, never skipped.
       mtime: 0,

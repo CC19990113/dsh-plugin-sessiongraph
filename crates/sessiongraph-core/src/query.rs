@@ -62,12 +62,12 @@ pub const DEFAULT_MAX_SNIPPET_CHARS: usize = 240;
 const MAX_LINEAGE_DEPTH: usize = 64;
 
 /// The `session` projections every result shape reads, qualified for the lineage CTEs.
-const SESSION_COLUMNS_S: &str = "s.id, s.workspace, s.title, s.created_at, s.last_at, \
+const SESSION_COLUMNS_S: &str = "s.id, s.source, s.workspace, s.title, s.created_at, s.last_at, \
      s.parent_session, s.origin, s.agent_preset, s.turns, s.entries";
 
 /// The same projection, unqualified, for a single-table read.
-const SESSION_COLUMNS: &str = "id, workspace, title, created_at, last_at, parent_session, origin, \
-     agent_preset, turns, entries";
+const SESSION_COLUMNS: &str = "id, source, workspace, title, created_at, last_at, parent_session, \
+     origin, agent_preset, turns, entries";
 
 /// One `.dsh/sessiongraph` index file, relative to the request's `indexRoot`.
 const INDEX_FILE: &str = "index.db";
@@ -397,6 +397,7 @@ fn cmp_plain(left: &MatchRow, right: &MatchRow) -> Ordering {
 /// One page row read back with the columns a hit reports.
 struct HitDetail {
     session_id: String,
+    source: String,
     title: Option<String>,
     workspace: String,
     time: i64,
@@ -470,6 +471,7 @@ fn search(connection: &Connection, request: &QueryRequest) -> QResult<Value> {
         }
         let mut hit = Map::new();
         hit.insert("sessionId".to_owned(), json!(detail.session_id));
+        hit.insert("source".to_owned(), json!(detail.source));
         if let Some(title) = optional_text(&detail.title) {
             hit.insert("title".to_owned(), json!(title));
         }
@@ -617,7 +619,8 @@ fn read_hit_details(connection: &Connection, ids: &[i64]) -> QResult<HashMap<i64
     for chunk in ids.chunks(ID_CHUNK) {
         let placeholders = vec!["?"; chunk.len()].join(", ");
         let sql = format!(
-            "SELECT e.id, e.session_id, s.title, s.workspace, e.time, e.kind, e.seq, e.turn, e.text
+            "SELECT e.id, e.session_id, s.source, s.title, s.workspace, e.time, e.kind, e.seq, e.turn,
+                    e.text
                FROM entry e JOIN session s ON s.id = e.session_id
               WHERE e.id IN ({placeholders})"
         );
@@ -631,13 +634,14 @@ fn read_hit_details(connection: &Connection, ids: &[i64]) -> QResult<HashMap<i64
                     row.get::<_, i64>(0)?,
                     HitDetail {
                         session_id: row.get(1)?,
-                        title: row.get(2)?,
-                        workspace: row.get(3)?,
-                        time: row.get(4)?,
-                        kind: row.get(5)?,
-                        seq: row.get(6)?,
-                        turn: row.get(7)?,
-                        text: row.get(8)?,
+                        source: row.get(2)?,
+                        title: row.get(3)?,
+                        workspace: row.get(4)?,
+                        time: row.get(5)?,
+                        kind: row.get(6)?,
+                        seq: row.get(7)?,
+                        turn: row.get(8)?,
+                        text: row.get(9)?,
                     },
                 ))
             })
@@ -1320,6 +1324,7 @@ fn workspace_clause(column: &str, workspace: Option<&str>) -> Option<(String, St
 /// One `session` row, as every result shape reports it.
 struct SessionRow {
     id: String,
+    source: String,
     workspace: String,
     title: Option<String>,
     created_at: i64,
@@ -1335,15 +1340,16 @@ struct SessionRow {
 fn session_row_at(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<SessionRow> {
     Ok(SessionRow {
         id: row.get(base)?,
-        workspace: row.get(base + 1)?,
-        title: row.get(base + 2)?,
-        created_at: row.get(base + 3)?,
-        last_at: row.get(base + 4)?,
-        parent_session: row.get(base + 5)?,
-        origin: row.get(base + 6)?,
-        agent_preset: row.get(base + 7)?,
-        turns: row.get(base + 8)?,
-        entries: row.get(base + 9)?,
+        source: row.get(base + 1)?,
+        workspace: row.get(base + 2)?,
+        title: row.get(base + 3)?,
+        created_at: row.get(base + 4)?,
+        last_at: row.get(base + 5)?,
+        parent_session: row.get(base + 6)?,
+        origin: row.get(base + 7)?,
+        agent_preset: row.get(base + 8)?,
+        turns: row.get(base + 9)?,
+        entries: row.get(base + 10)?,
     })
 }
 
@@ -1383,6 +1389,7 @@ where
 fn session_summary_json(row: &SessionRow) -> Value {
     let mut map = Map::new();
     map.insert("sessionId".to_owned(), json!(row.id));
+    map.insert("source".to_owned(), json!(row.source));
     if let Some(title) = optional_text(&row.title) {
         map.insert("title".to_owned(), json!(title));
     }

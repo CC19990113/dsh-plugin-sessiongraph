@@ -56,14 +56,18 @@ import type {
 import { acquireIndexLock } from './lock.ts'
 import { collectLiveSessions, LIVE_SOURCE_PREFIX } from './live.ts'
 import type { SessionQueryService } from './live.ts'
+import { parseCodexRollout } from './codex.ts'
 import { parseSessionLog } from './parse.ts'
 import type { ParsedSession } from './parse.ts'
-import { scanSessions } from './scan.ts'
+import { readCodexTitles, scanCodexSessions, scanSessions } from './scan.ts'
+import type { SessionFile } from './scan.ts'
 import { readIndexState, STATUS_RELATIVE_PATH, writeIndex } from './write.ts'
 import type { IndexedSession, IndexWriteResult } from './write.ts'
 
 export { decompressSessionLog, parseSessionLog } from './parse.ts'
 export type { ParsedEntry, ParsedSession, SessionParseLimits } from './parse.ts'
+export { parseCodexLines, parseCodexRollout } from './codex.ts'
+export type { CodexParseOptions } from './codex.ts'
 export {
   foldRawSurface,
   isLiveSource,
@@ -80,7 +84,7 @@ export type {
   RawSurfaceFold,
   ReadRawEventsOptions,
 } from './raw.ts'
-export { scanSessions } from './scan.ts'
+export { readCodexTitles, scanCodexSessions, scanSessions } from './scan.ts'
 export type { SessionFile } from './scan.ts'
 export { LIVE_SOURCE_PREFIX } from './live.ts'
 export type { LiveIndexOptions, LiveIndexResult, SessionQueryService } from './live.ts'
@@ -98,6 +102,15 @@ export const DEFAULT_INDEXER_ID = 'sessiongraph-sessions'
 
 /** Default harness session directory. */
 export const DEFAULT_SESSIONS_ROOT = join(homedir(), '.dsh', 'sessions')
+
+/**
+ * Default Codex home, whose `archived_sessions/` and `sessions/` directories hold its rollout logs.
+ *
+ * Indexed by default when the directory exists and contributes nothing when it does not: a machine
+ * that has never run Codex has nothing to find, and requiring a config change to start indexing a
+ * store the user already has is the kind of manual step this plugin exists to avoid.
+ */
+export const DEFAULT_CODEX_ROOT = join(homedir(), '.codex')
 
 /**
  * Default index root, matching the tool's own default so a stock profile's automatic refresh writes
@@ -216,6 +229,18 @@ export interface Config {
    * once when it cannot be used before falling back; `typescript` never probes the kernel at all.
    */
   engine?: SessiongraphEngineSetting
+  /**
+   * Also index OpenAI Codex's rollout logs (default true). Both of its stores — `archived_sessions/`
+   * and the date-nested `sessions/` — are read.
+   *
+   * The two harnesses' logs are parsed into one index, discriminated by `session.source`, because a
+   * question about a project is answered by both ("what did I decide about this repo" does not care
+   * which agent was driving). Set false on a machine where Codex's history is not wanted; the next
+   * run drops its rows.
+   */
+  codex?: boolean
+  /** Codex home directory the rollout logs are read from (default `~/.codex`). */
+  codexRoot?: string
 }
 
 export const Config: z<Config> = z.object({
@@ -232,6 +257,8 @@ export const Config: z<Config> = z.object({
   autoIndexTimeoutMs: z.number().default(DEFAULT_AUTO_INDEX_TIMEOUT_MS),
   maxLiveSessions: z.number().default(DEFAULT_MAX_LIVE_SESSIONS),
   engine: z.union([z.const('auto'), z.const('native'), z.const('typescript')]).default(DEFAULT_ENGINE),
+  codex: z.boolean().default(true),
+  codexRoot: z.string().default(DEFAULT_CODEX_ROOT),
 })
 
 /** Configuration after the schema filled in every default. */
@@ -550,7 +577,7 @@ async function startBackgroundIndex(
     if (jobs === undefined) return undefined
     // Asked last, so a composition without a registry never pays for the store scan below. The
     // source count is the run's real size; the sidecar only describes what the last run saw.
-    if ((await countSessionFiles(config.sessionsRoot)) < config.backgroundIndexThreshold) return undefined
+    if ((await countSessionFiles(config)) < config.backgroundIndexThreshold) return undefined
     return jobs.start({
       owner,
       kind: AUTO_INDEX_JOB_KIND,
@@ -604,13 +631,17 @@ function indexJobOwner(options: SessiongraphIndexOptions): string | undefined {
 }
 
 /**
- * Count the session logs an index run would read.
- * @param sessionsRoot - the harness session store.
- * @returns the number of logs, or zero when the store cannot be listed.
+ * Count the session logs an index run would read, across every configured source.
+ * @param config - resolved plugin configuration.
+ * @returns the number of logs, or zero when a store cannot be listed.
  */
-async function countSessionFiles(sessionsRoot: string): Promise<number> {
+async function countSessionFiles(config: ResolvedConfig): Promise<number> {
   try {
-    return (await scanSessions(sessionsRoot)).length
+    const [harness, codex] = await Promise.all([
+      scanSessions(config.sessionsRoot),
+      config.codex ? scanCodexSessions(config.codexRoot) : Promise.resolve<SessionFile[]>([]),
+    ])
+    return harness.length + codex.length
   } catch {
     return 0
   }
@@ -933,19 +964,35 @@ async function runIndexUnlocked(
 
   // `auto` prefers the kernel and falls back silently; `native` asks for it explicitly, so a machine
   // without a usable build is told why it got TypeScript results instead.
-  const native = resolveNativeEngine(config.engine)
+  //
+  // The kernel indexes DSH's own logs only — it has no Codex reader — so a run that must include
+  // Codex's history takes the TypeScript path. Silently answering half the corpus would be worse than
+  // the slower engine, and a user who pinned `native` deserves to know why it did not run.
+  const codexPending = config.codex && (await scanCodexSessions(config.codexRoot)).length > 0
+  const native = codexPending ? undefined : resolveNativeEngine(config.engine)
   if (native !== undefined) {
     const nativeReport = await runNativeEngine(native, indexPath, options, config, inScope, ctx, signal, startedAt)
     if (nativeReport !== undefined) return nativeReport
   } else if (config.engine === 'native') {
     console.error(
-      'sessiongraph-sessions: the native index engine is unavailable on this machine; ' +
-      'falling back to the TypeScript engine',
+      codexPending
+        ? 'sessiongraph-sessions: the native index engine cannot read Codex rollout logs; ' +
+            'using the TypeScript engine for this run'
+        : 'sessiongraph-sessions: the native index engine is unavailable on this machine; ' +
+            'falling back to the TypeScript engine',
     )
   }
 
-  const files = await scanSessions(config.sessionsRoot)
+  // Both harness stores are scanned even though only one may exist: an absent Codex home is an empty
+  // contribution, and the scan is cheap next to the parse that follows it.
+  const [harnessFiles, codexFiles] = await Promise.all([
+    scanSessions(config.sessionsRoot),
+    config.codex ? scanCodexSessions(config.codexRoot) : Promise.resolve<SessionFile[]>([]),
+  ])
   signal?.throwIfAborted()
+  const codexTitles = codexFiles.length === 0 ? undefined : await readCodexTitles(config.codexRoot)
+  signal?.throwIfAborted()
+  const files = [...harnessFiles, ...codexFiles]
 
   const previous = readIndexState(indexPath)
   // A missing or unusable previous index is rebuilt through the temporary file too, so a corrupt or
@@ -953,10 +1000,12 @@ async function runIndexUnlocked(
   const force = options.force === true || previous === undefined
 
   const failed: { path: string; reason: string }[] = []
-  const candidates: IndexedSession[] = []
+  // Keyed by session id rather than by path: Codex keeps a conversation in `archived_sessions/` after
+  // copying it out of `sessions/`, so the same id can arrive from two files. The later copy wins when
+  // it reaches further, which is what makes "the session committed is the most complete one" true
+  // without a second pass.
+  const candidates = new Map<string, IndexedSession>()
   const seen = new Set<string>()
-  let added = 0
-  let updated = 0
   let skipped = 0
 
   for (const file of files) {
@@ -980,20 +1029,25 @@ async function runIndexUnlocked(
     let session: ParsedSession
     try {
       const buffer = await readFile(file.filePath)
-      session = parseSessionLog(buffer, basename(file.sessionDir), {
-        maxEntryChars: config.maxEntryChars,
-        toolCallChars: config.toolCallChars,
-      })
+      const limits = { maxEntryChars: config.maxEntryChars, toolCallChars: config.toolCallChars }
+      session =
+        file.source === 'codex'
+          ? parseCodexRollout(buffer, codexFallbackId(file.filePath), { ...limits, titles: codexTitles })
+          : parseSessionLog(buffer, basename(file.sessionDir), limits)
     } catch (error) {
       failed.push({ path: file.filePath, reason: describeError(error) })
       continue
     }
 
     if (scoped && !inScope(session.cwd, session.id)) continue
-    candidates.push({ session, sourcePath: file.filePath, mtime: file.mtime, size: file.size })
-    if (existing === undefined) added += 1
-    else updated += 1
+    const superseded = candidates.get(session.id)
+    if (superseded !== undefined && superseded.session.lastAt > session.lastAt) continue
+    candidates.set(session.id, { session, source: file.source, sourcePath: file.filePath, mtime: file.mtime, size: file.size })
   }
+
+  const written = [...candidates.values()]
+  const added = written.filter(item => previous?.get(item.sourcePath) === undefined).length
+  const updated = written.length - added
 
   // A scoped run only removes what it can see: rows outside the requested workspace or session are
   // kept, because "not in this scan" says nothing about a source the caller excluded on purpose.
@@ -1013,7 +1067,7 @@ async function runIndexUnlocked(
     indexPath,
     force,
     preserveExisting: force && scoped && previous !== undefined,
-    sessions: candidates,
+    sessions: written,
     removed,
     discovered: files.length,
     failed: failed.length,
@@ -1070,6 +1124,21 @@ export function matchesWorkspace(filter: string | undefined, workspace: string):
 export function matchesSession(filter: string | undefined, id: string): boolean {
   if (filter === undefined) return true
   return id === filter || id.startsWith(filter)
+}
+
+/**
+ * Derive the id to record when a Codex rollout carries no `session_meta`.
+ *
+ * Codex names its files `rollout-<iso>-<uuid>.jsonl.zst`, so the uuid survives even from a truncated
+ * log — which matters because a conversation whose first line is missing would otherwise be indexed
+ * under a filename that changes the moment it is archived.
+ * @param filePath - absolute path of the rollout log.
+ * @returns the uuid from the filename, else the filename with both suffixes removed.
+ */
+function codexFallbackId(filePath: string): string {
+  const name = basename(filePath)
+  const match = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl\.zst$/i.exec(name)
+  return match?.[1] ?? name.replace(/\.jsonl\.zst$/, '')
 }
 
 /**

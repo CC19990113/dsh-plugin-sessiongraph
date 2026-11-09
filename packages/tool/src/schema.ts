@@ -17,10 +17,10 @@
  */
 
 import type { InferArgs, InferValue } from '@deepseek-ai/dsh-tools'
-import { SESSIONGRAPH_ENTRY_KINDS, SESSIONGRAPH_OPERATIONS } from 'dsh-plugin-sessiongraph-service'
+import { SESSIONGRAPH_ENTRY_KINDS, SESSIONGRAPH_OPERATIONS, SESSIONGRAPH_SOURCES } from 'dsh-plugin-sessiongraph-service'
 import type { SessiongraphOperation } from 'dsh-plugin-sessiongraph-service'
 
-export { SESSIONGRAPH_ENTRY_KINDS, SESSIONGRAPH_OPERATIONS }
+export { SESSIONGRAPH_ENTRY_KINDS, SESSIONGRAPH_OPERATIONS, SESSIONGRAPH_SOURCES }
 
 /** Every operation the one model-facing tool exposes: the seam's queries plus the write. */
 export const SESSIONGRAPH_TOOL_OPERATIONS = [...SESSIONGRAPH_OPERATIONS, 'index'] as const
@@ -51,6 +51,7 @@ const SESSION_SUMMARY = {
   additionalProperties: false,
   properties: {
     session_id: { type: 'string', required: true },
+    source: { type: 'string', required: true },
     title: { type: 'string' },
     workspace: { type: 'string', required: true },
     created_at: { type: 'integer', required: true },
@@ -72,6 +73,7 @@ const HIT = {
   additionalProperties: false,
   properties: {
     session_id: { type: 'string', required: true },
+    source: { type: 'string', required: true },
     title: { type: 'string' },
     workspace: { type: 'string', required: true },
     time: { type: 'integer', required: true },
@@ -350,6 +352,13 @@ export const SESSIONGRAPH_PARAMETERS = {
   workspace: {
     type: 'string',
     description: '只看某个工作区：精确的 cwd，或不带结尾斜杠的路径前缀；也可用于 index 限定索引范围。',
+  },
+  source: {
+    type: 'string',
+    enum: [...SESSIONGRAPH_SOURCES],
+    description:
+      '只看某个 agent 写的会话：dsh（本宿主 ~/.dsh/sessions）、codex（Codex 的 rollout 日志）。'
+      + '省略即全部来源。search / timeline / workspaces 可用。',
   },
   after: {
     type: 'number',

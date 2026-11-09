@@ -55,6 +55,8 @@ function config(): ResolvedConfig {
     autoIndexTimeoutMs: 900_000,
     maxLiveSessions: 8,
     engine: 'typescript',
+    codex: false,
+    codexRoot: join(fixture.work, 'codex'),
   }
 }
 
@@ -197,7 +199,7 @@ describe('runIndex', () => {
     expect(composed).toHaveLength(1)
 
     expect(readStatus()).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       indexedAt: expect.any(Number),
       sessions: report.sessions,
       entries: report.entries,
@@ -207,7 +209,7 @@ describe('runIndex', () => {
 
     const meta = query('SELECT key, value FROM meta ORDER BY key')
     expect(Object.fromEntries(meta.map(row => [row.key, row.value]))).toMatchObject({
-      schema_version: '2',
+      schema_version: '3',
       discovered: '2',
       failed: '0',
     })
@@ -369,7 +371,12 @@ describe('apply', () => {
     await writeDemoSession()
     const ctx = new Context()
     await ctx.plugin(ServicePlugin)
-    await ctx.plugin(SessionsPlugin, { sessionsRoot: fixture.sessionsRoot, engine: 'typescript' })
+    await ctx.plugin(SessionsPlugin, {
+      sessionsRoot: fixture.sessionsRoot,
+      engine: 'typescript',
+      codex: false,
+      codexRoot: join(fixture.work, 'codex'),
+    })
 
     const seam = (ctx as unknown as { readonly sessiongraph: { index: typeof runIndex } }).sessiongraph
     const report = await seam.index(fixture.indexRoot, {})

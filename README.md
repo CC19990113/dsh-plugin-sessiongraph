@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-Every DSH session on this machine, indexed as one searchable corpus — the model looks up "where did I say or do this" in milliseconds, instead of you digging through the sidebar or grepping compressed logs.
+Every DSH **and Codex** session on this machine, indexed as one searchable corpus — the model looks up "where did I say or do this" in milliseconds, instead of you digging through the sidebar or grepping compressed logs.
 
 ## Architecture
 
@@ -12,7 +12,7 @@ Six packages behind one strict seam: **adding a store or an indexer never touche
 |---|---|
 | `service` | Defines the `ctx.sessiongraph` seam: query vocabulary, store/indexer registries, schema v1, the Chinese bigram tokenizer |
 | `sqlite` | Read provider: answers the seven queries from `index.db`, routing between the native and TypeScript engines |
-| `sessions` | Write provider: scan session logs, decode frame by frame, extract entries, write the database (TypeScript and Rust engines); `raw.ts` reads unabridged events back |
+| `sessions` | Write provider: scan both harnesses' session logs (DSH and Codex), decode, extract entries, write the database; `raw.ts` reads unabridged events back |
 | `tool` | Consumer: **one** `sessiongraph` tool (eight operations), the `/sessiongraph` command, the system-prompt section, the settings HTTP route, and tool visibility |
 | `native` | Rust kernel: index writes (`indexSessions`) and queries (`query`); returns `undefined` on any failure, never throws |
 | `panel` | Browser half only: the settings "会话检索" tab (`dsh.client`; the host entry is an empty apply) |
@@ -77,7 +77,7 @@ Memory does not overlap with either: a conversation may **never enter memory** (
 
 | Operation | What it does |
 |---|---|
-| `search` | Cross-session full-text search; filters on `sessionId` / `workspace` / `after` / `before` / `kinds`. One hit per session by default (`dedupeBySession: false` to disable). Returns title, workspace, time, turn and a highlighted snippet |
+| `search` | Cross-session full-text search; filters on `sessionId` / `workspace` / `source` / `after` / `before` / `kinds`. One hit per session by default (`dedupeBySession: false` to disable). Returns source, title, workspace, time, turn and a highlighted snippet |
 | `session` | Open one session by full id or unique prefix: metadata, ordered entries, child sessions |
 | `event` | Read **one unabridged raw event** from the source log (not the index's clipped text), with optional `windowBefore` / `windowAfter` neighbours |
 | `trace` | Without `seq`: session lineage (ancestor chain + recursive descendant tree). With `seq`: that event's replacement chain, shadowed range and cited source events |
@@ -147,6 +147,25 @@ The system prompt already says to search the index instead of grepping compresse
 ### What gets indexed
 
 `user/message` (only `source.kind === 'user'`, i.e. text a human typed), the `text` blocks of `assistant/message` (`reasoning` is 61% of the bytes and is not indexed), `tool/call` names and arguments, and `session/title`. Skipped: `tool/result` bodies, `request/header`, `step/*`, `job/*`.
+
+### Two harnesses, one index
+
+DSH's own logs and OpenAI Codex's rollout logs are parsed into **one** index, each session row tagged with `session.source` (`dsh` / `codex`) — "how did we decide this for this repo" should not depend on which agent happened to be driving.
+
+| | Where | Shape |
+|---|---|---|
+| `dsh` | `~/.dsh/sessions/<escaped-cwd>/<id>/session.vN.jsonl.zstd` | header line + flat events |
+| `codex` | `~/.codex/archived_sessions/*.jsonl.zst` (archived) and `~/.codex/sessions/<yyyy>/<mm>/<dd>/` (active) | envelopes `{timestamp, ordinal, type, payload}` |
+
+Three Codex rules were learned the hard way:
+
+- **`developer` is not a human.** Codex injects its whole instruction set as a `developer` message on every turn; indexing it would make the system prompt the most-matching document in the corpus.
+- **`user` is not always a human either.** `<environment_context>`, `<user_instructions>` and `<permissions instructions>` all arrive as `user` role — on this machine 251 of 1678 user-role records carried nothing but injected context. The tags are stripped and a record that reduces to nothing is dropped; discarding whole records instead would lose the question that follows an environment block.
+- **The title is not in the log.** Codex keeps thread names in `~/.codex/session_index.jsonl`, read once per run to fill titles (34 of this machine's 88 sessions have one).
+
+Measured here: Codex 88 sessions / 27752 entries (1427 user, 8222 assistant, 18069 tool), DSH 764 sessions / 112562 entries — 27 s for a full rebuild, 274 ms incremental.
+
+**The native kernel does not read Codex yet** — the Rust parser covers DSH logs only. So when `codex` is on and `~/.codex` really holds logs, that run takes the TypeScript engine (with a stderr line when `engine: 'native'` was pinned) rather than silently dropping half the corpus. `codex: false` turns Codex collection off; `codexRoot` points at another Codex home.
 
 ### Why two-character Chinese terms match
 

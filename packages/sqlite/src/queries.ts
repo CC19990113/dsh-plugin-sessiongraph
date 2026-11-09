@@ -63,6 +63,7 @@ import {
 /** Every `session` column the summary projection reads. */
 const SESSION_COLUMNS = [
   'id',
+  'source',
   'workspace',
   'title',
   'created_at',
@@ -83,6 +84,7 @@ const ENTRY_COLUMNS = 'seq, time, kind, turn, text, clipped'
  */
 const SESSION_COLUMNS_S = [
   'id',
+  'source',
   'workspace',
   'title',
   'created_at',
@@ -126,7 +128,7 @@ const KIND_WEIGHTS: Readonly<Record<SessiongraphEntryKind, number>> = {
 }
 
 /** The one `entry` projection a search hit needs, shared by the deduped and plain queries. */
-const HIT_COLUMNS = `e.session_id AS session_id, s.title AS title, s.workspace AS workspace,
+const HIT_COLUMNS = `e.session_id AS session_id, s.source AS source, s.title AS title, s.workspace AS workspace,
        e.time AS time, e.kind AS kind, e.seq AS seq, e.turn AS turn, e.text AS text`
 
 /**
@@ -363,6 +365,10 @@ export function search(
     filters.push(workspace.clause)
     params.push(...workspace.params)
   }
+  if (request.source !== undefined) {
+    filters.push('s.source = ?')
+    params.push(request.source)
+  }
   if (request.after !== undefined) {
     filters.push('e.time >= ?')
     params.push(request.after)
@@ -421,7 +427,7 @@ function dedupedPageSql(from: string): string {
     ) AS session_rank
       FROM matched
   )
-  SELECT session_id, title, workspace, time, kind, seq, turn, text
+  SELECT session_id, source, title, workspace, time, kind, seq, turn, text
     FROM ranked
    WHERE session_rank = 1
    ORDER BY score / ${weightExpression('kind')}, time DESC, seq ASC, entry_id ASC`
@@ -823,6 +829,10 @@ export function timeline(db: DatabaseSync, request: SessiongraphTimelineRequest)
     filters.push(workspace.clause)
     params.push(...workspace.params)
   }
+  if (request.source !== undefined) {
+    filters.push('s.source = ?')
+    params.push(request.source)
+  }
   // `after`/`before` describe the session's span, not an entry's time: `after` is "still active at or
   // after", `before` is "already started at or before", so a call can ask for sessions alive in a
   // window without knowing their internal event ordering.
@@ -860,7 +870,12 @@ export function workspaces(
   db: DatabaseSync,
   request: SessiongraphWorkspacesRequest,
 ): SessiongraphWorkspacesResult {
-  const total = count(db, 'SELECT count(DISTINCT workspace) AS total FROM session')
+  // The census answers "which directories does this index cover", so a source filter narrows both
+  // halves consistently: a total counted over every session beside a page filtered to one harness
+  // would make `truncated` meaningless.
+  const where = request.source === undefined ? '' : 'WHERE source = ?'
+  const params = request.source === undefined ? [] : [request.source]
+  const total = count(db, `SELECT count(DISTINCT workspace) AS total FROM session ${where}`, params)
   const limit = bound(request.limit)
   if (limit === 0) return { operation: 'workspaces', workspaces: [], total }
   const found: SessiongraphWorkspaceStat[] = rows(
@@ -871,10 +886,11 @@ export function workspaces(
             min(created_at) AS first_at,
             max(last_at) AS last_at
        FROM session
+      ${where}
       GROUP BY workspace
       ORDER BY max(last_at) DESC, workspace ASC
       LIMIT ? OFFSET ?`,
-    [limit, bound(request.offset)],
+    [...params, limit, bound(request.offset)],
   ).map(toWorkspaceStat)
   return { operation: 'workspaces', workspaces: found, total }
 }

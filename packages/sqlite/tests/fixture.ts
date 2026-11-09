@@ -28,6 +28,8 @@ export interface SeedEntry {
 /** One session to seed. `entries` are written in the order given. */
 export interface SeedSession {
   id: string
+  /** Which harness wrote the log; defaults to `dsh`. */
+  source?: 'dsh' | 'codex'
   workspace: string
   title?: string
   createdAt?: number
@@ -71,9 +73,9 @@ export function writeIndexAt(root: string, seed: SeedIndex): void {
   if (seed.indexedAt !== undefined) insertMeta.run(META_INDEXED_AT, String(seed.indexedAt))
 
   const insertSession = db.prepare(`INSERT INTO session
-    (id, workspace, title, created_at, last_at, parent_session, origin, agent_preset, turns, entries,
+    (id, source, workspace, title, created_at, last_at, parent_session, origin, agent_preset, turns, entries,
      source_path, source_mtime, source_size)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 100)`)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 100)`)
   const insertEntry = db.prepare(`INSERT INTO entry
     (session_id, seq, time, turn, kind, text, clipped)
     VALUES (?, ?, ?, ?, ?, ?, ?)`)
@@ -81,6 +83,7 @@ export function writeIndexAt(root: string, seed: SeedIndex): void {
   for (const session of seed.sessions) {
     insertSession.run(
       session.id,
+      session.source ?? 'dsh',
       session.workspace,
       session.title ?? null,
       session.createdAt ?? 0,

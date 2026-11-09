@@ -30,13 +30,17 @@ import {
   SCHEMA_STATEMENTS,
   SCHEMA_VERSION,
   SESSION_TABLE,
+  SESSIONGRAPH_SOURCES,
   tokenize,
 } from 'dsh-plugin-sessiongraph-service'
+import type { SessiongraphSource } from 'dsh-plugin-sessiongraph-service'
 import type { ParsedSession } from './parse.ts'
 
 /** One parsed session and the source it is recorded as coming from. */
 export interface IndexedSession {
   readonly session: ParsedSession
+  /** Which harness wrote the log this session was parsed from. */
+  readonly source: SessiongraphSource
   /**
    * Absolute path of the log it came from, or the synthetic `live://<id>` marker for a session the
    * host still holds in memory and that has no stable file version yet.
@@ -60,6 +64,8 @@ export const STATUS_RELATIVE_PATH = 'status.json'
 /** What a previous index already holds for one source file. */
 export interface ExistingSession {
   readonly id: string
+  /** Which harness wrote the session, as the previous run recorded it. */
+  readonly source: SessiongraphSource
   readonly workspace: string
   /** Absolute path of the session log this row was built from. */
   readonly sourcePath: string
@@ -115,7 +121,7 @@ export function readIndexState(indexPath: string): ReadonlyMap<string, ExistingS
     const version = database.prepare(`SELECT value FROM meta WHERE key = ?`).get(META_SCHEMA_VERSION)
     if (version === undefined || String(version.value) !== String(SCHEMA_VERSION)) return undefined
     const rows = database
-      .prepare(`SELECT id, workspace, source_path, source_mtime, source_size FROM ${SESSION_TABLE}`)
+      .prepare(`SELECT id, source, workspace, source_path, source_mtime, source_size FROM ${SESSION_TABLE}`)
       .all()
     const existing = new Map<string, ExistingSession>()
     for (const row of rows) {
@@ -124,6 +130,7 @@ export function readIndexState(indexPath: string): ReadonlyMap<string, ExistingS
       if (id === undefined || sourcePath === undefined) continue
       existing.set(sourcePath, {
         id,
+        source: sourceColumn(row, 'source'),
         workspace: stringColumn(row, 'workspace') ?? '',
         sourcePath,
         mtime: numberColumn(row, 'source_mtime') ?? 0,
@@ -247,9 +254,9 @@ function writeAll(database: DatabaseSync, plan: IndexWritePlan): void {
       const removeSessionForSource = database.prepare(`DELETE FROM ${SESSION_TABLE} WHERE id = ? OR source_path = ?`)
       const insertSession = database.prepare(
         `INSERT INTO ${SESSION_TABLE}
-          (id, workspace, title, created_at, last_at, parent_session, origin, agent_preset, turns, entries,
+          (id, source, workspace, title, created_at, last_at, parent_session, origin, agent_preset, turns, entries,
            source_path, source_mtime, source_size)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       const insertEntry = database.prepare(
         `INSERT INTO ${ENTRY_TABLE} (session_id, seq, time, turn, kind, text, clipped) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -257,7 +264,7 @@ function writeAll(database: DatabaseSync, plan: IndexWritePlan): void {
       const insertFts = database.prepare(`INSERT INTO ${ENTRY_FTS_TABLE} (rowid, tokens) VALUES (?, ?)`)
 
       for (const item of plan.sessions) {
-        const { session, sourcePath, mtime, size } = item
+        const { session, source, sourcePath, mtime, size } = item
         // Keyed by id AND source path: a session whose id changed between runs must not leave its
         // old row behind, and the source path is the stable half of the pair.
         removeFtsForSource.run(session.id, sourcePath)
@@ -266,6 +273,7 @@ function writeAll(database: DatabaseSync, plan: IndexWritePlan): void {
 
         insertSession.run(
           session.id,
+          source,
           session.cwd,
           session.title ?? null,
           session.createdAt,
@@ -398,6 +406,18 @@ function escapeSqlLiteral(value: string): string {
 function stringColumn(row: Record<string, unknown>, key: string): string | undefined {
   const value = row[key]
   return typeof value === 'string' ? value : undefined
+}
+
+/**
+ * Read one source column, refusing a value this build does not know.
+ * @param row - result row.
+ * @param key - column name.
+ * @returns the recorded source, or `dsh` for a row written before the column existed.
+ */
+function sourceColumn(row: Record<string, unknown>, key: string): SessiongraphSource {
+  const value = stringColumn(row, key)
+  const known = (SESSIONGRAPH_SOURCES as readonly string[]).includes(value ?? '')
+  return known ? (value as SessiongraphSource) : 'dsh'
 }
 
 /**

@@ -5,6 +5,10 @@
 
 ## 1. 数据源
 
+两个 harness，解析进同一个库，`session.source` 记录来源。
+
+### 1.1 DSH 自己的日志
+
 布局：`~/.dsh/sessions/<escaped-cwd>/<session-id>/session.v4.jsonl.zstd`
 
 - `<escaped-cwd>`：工作区绝对路径转义，形如 `--Users-<user>-www-<project>--`
@@ -80,6 +84,34 @@ function decompressSessionLog(buffer: Buffer): Buffer {
 - `tool/call`：`data.name`、`data.arguments`（字符串化的 JSON）、`data.turn`、`data.step`、`data.callId`
 - `turn/start`：`data.turn`
 
+### 1.2 Codex 的 rollout 日志
+
+启用条件：`codex: true`（默认）且 `~/.codex` 存在；`codexRoot` 可换 home。
+
+两处布局，同一文件形状（zstd + JSONL，实测单帧）：
+
+- `~/.codex/archived_sessions/rollout-<iso>-<uuid>.jsonl.zst`（扁平，归档）
+- `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<iso>-<uuid>.jsonl.zst`（按日期分层，活会话）
+
+每行是信封 `{ timestamp, ordinal, type, payload }`，`ordinal` 就是 `seq`。四种 type 有关：
+
+| type | 用途 |
+|---|---|
+| `session_meta` | `payload.session_id` / `cwd` / `timestamp` / `originator` / `cli_version` |
+| `turn_context` | `payload.turn_id` 变化计一轮；`payload.model` 记为 `agent_preset` |
+| `response_item` / `message` | `role` 为 `user` / `assistant` / `developer` |
+| `response_item` / `function_call`、`custom_tool_call`、`web_search_call` | 工具调用（`name` + `arguments` / `input` / `query`） |
+
+跳过：`developer` 角色（整套指令集）、`reasoning`、所有 `*_output`（工具结果）、`event_msg/*`（token 计数等）、`compacted`（别的模型写的交接摘要）。
+
+**注入剥离**：`user` 角色里混着 `<environment_context>` / `<user_instructions>` / `<permissions instructions>` / `<turn_aborted>`，按标签整块删掉再 trim，剩空就丢。本机 1678 条 user 记录里 251 条剥完是空。
+
+**标题**：rollout 里没有，来自 `~/.codex/session_index.jsonl` 的 `{ id, thread_name }`，每轮读一次建映射传进解析器（解析器保持纯函数）。
+
+**去重**：同一会话可能同时出现在 `archived_sessions/` 和 `sessions/`，所以候选集按 `session.id` 去重（保留 `lastAt` 更大的那份），而不是按路径。
+
+**native 边界**：Rust 内核只解析 DSH 日志。`codex` 打开且确实扫到文件时，那次运行跳过 native 直接走 TypeScript（`engine: 'native'` 时 stderr 一行说明）；否则半份语料会被静默丢掉。
+
 ## 2. 索引库
 
 位置：`<indexRoot>/index.db`，`indexRoot` 默认 `~/.dsh/sessiongraph`。
@@ -88,7 +120,8 @@ schema 见 `packages/service/src/schema.ts`（`SCHEMA_STATEMENTS`），三方共
 
 表：
 
-- `session(id PK, workspace, title, created_at, last_at, parent_session, origin, agent_preset, turns, entries, source_path, source_mtime, source_size)`
+- `session(id PK, source, workspace, title, created_at, last_at, parent_session, origin, agent_preset, turns, entries, source_path, source_mtime, source_size)`
+  - `source` 是 `dsh` / `codex`（`SESSIONGRAPH_SOURCES`，闭集）；不在闭集里的值按 `SESSIONGRAPH_CORRUPT` 拒绝，和 schema 版本不匹配同类处理
 - `entry(id PK, session_id, seq, time, turn, kind, text, clipped)`
 - `entry_fts(tokens)` FTS5，`rowid` 对齐 `entry.id`，tokenizer `unicode61`
 - `meta(key, value)`：`schema_version` / `indexed_at` / `discovered` / `failed`

@@ -30,7 +30,7 @@ use crate::parse::ParsedSession;
 use crate::tokenize;
 
 /// Current on-disk schema version, matching `SCHEMA_VERSION` in the seam package.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Relative path of the index file inside an index root.
 pub const INDEX_RELATIVE_PATH: &str = "index.db";
@@ -68,6 +68,7 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
    )",
     "CREATE TABLE IF NOT EXISTS session (
      id TEXT PRIMARY KEY,
+     source TEXT NOT NULL,
      workspace TEXT NOT NULL,
      title TEXT,
      created_at INTEGER NOT NULL,
@@ -347,9 +348,9 @@ fn apply_plan(connection: &Connection, plan: &WritePlan<'_>, preserve: bool) -> 
     let mut insert_session = connection
         .prepare(
             "INSERT INTO session
-              (id, workspace, title, created_at, last_at, parent_session, origin, agent_preset, turns,
-               entries, source_path, source_mtime, source_size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              (id, source, workspace, title, created_at, last_at, parent_session, origin, agent_preset,
+               turns, entries, source_path, source_mtime, source_size)
+             VALUES (?1, 'dsh', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
         .map_err(database_error)?;
     let mut insert_entry = connection

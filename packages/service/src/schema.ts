@@ -15,8 +15,12 @@
  * v2 stores the FTS index contentless (`content=''`): FTS5's default build keeps a copy of every
  * indexed column in a `_content` shadow table, which on a real corpus was 67MB of a 174MB file
  * holding a token stream that can always be recomputed from `entry.text`.
+ *
+ * v3 records which harness wrote a session (`session.source`). The first version indexed only DSH's
+ * own logs, so the column is absent rather than defaulted; a v3 row carries `'dsh'` or `'codex'` and
+ * a store that cannot name the origin refuses the file instead of labelling every hit "dsh".
  */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 /** Relative path of the index file inside an index root. */
 export const INDEX_RELATIVE_PATH = 'index.db'
@@ -49,6 +53,7 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
    )`,
   `CREATE TABLE IF NOT EXISTS ${SESSION_TABLE} (
      id TEXT PRIMARY KEY,
+     source TEXT NOT NULL,
      workspace TEXT NOT NULL,
      title TEXT,
      created_at INTEGER NOT NULL,

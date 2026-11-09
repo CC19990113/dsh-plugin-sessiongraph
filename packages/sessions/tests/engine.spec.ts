@@ -51,6 +51,8 @@ function config(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     autoIndexTimeoutMs: 900_000,
     maxLiveSessions: 8,
     engine: 'auto',
+    codex: false,
+    codexRoot: join(fixture.work, 'codex'),
     ...overrides,
   }
 }

@@ -37,6 +37,20 @@ export const SESSIONGRAPH_ENTRY_KINDS = ['user', 'assistant', 'tool', 'title'] a
 /** One entry kind. */
 export type SessiongraphEntryKind = (typeof SESSIONGRAPH_ENTRY_KINDS)[number]
 
+/**
+ * Which agent harness wrote a session log.
+ *
+ * `dsh` is this host's own store under `~/.dsh/sessions`; `codex` is OpenAI Codex's rollout log
+ * under `~/.codex`. The value is stored per session, not per index, because one index deliberately
+ * holds both and a hit that cannot say where it came from makes a caller read the wrong file. It is
+ * a closed set rather than a free-form string: an unknown origin is a bug in the indexer, and
+ * widening this list is how a new harness becomes queryable.
+ */
+export const SESSIONGRAPH_SOURCES = ['dsh', 'codex'] as const
+
+/** One session source. */
+export type SessiongraphSource = (typeof SESSIONGRAPH_SOURCES)[number]
+
 /** Error codes the seam raises, so a consumer can distinguish "no index" from "bad request". */
 export type SessiongraphErrorCode =
   | 'SESSIONGRAPH_UNAVAILABLE'
@@ -75,6 +89,14 @@ export interface SessiongraphSearchRequest extends SessiongraphRequestBase {
   query: string
   /** Restrict to one workspace (exact `cwd`), or a path prefix when it ends without a trailing slash. */
   workspace?: string
+  /**
+   * Restrict to sessions one harness wrote.
+   *
+   * An index holds DSH's own logs and Codex's rollout logs side by side, and the two answer different
+   * questions: "what did I ask DSH about this repo" and "what did I ask Codex about it". Absent means
+   * every source, which is the right default for a cross-harness sweep.
+   */
+  source?: SessiongraphSource
   /** Only entries at or after this epoch-millisecond timestamp. */
   after?: number
   /** Only entries at or before this epoch-millisecond timestamp. */
@@ -106,6 +128,8 @@ export interface SessiongraphSearchRequest extends SessiongraphRequestBase {
 /** One matched entry, with enough context to recognize it without a second query. */
 export interface SessiongraphHit {
   sessionId: SessiongraphSessionId
+  /** Which harness wrote the session this hit belongs to. */
+  source: SessiongraphSource
   /** Session title, when the session ever produced one. */
   title: string | undefined
   /** The session's working directory. */
@@ -143,6 +167,8 @@ export interface SessiongraphSearchResult {
 /** A session's metadata, as the timeline and session operations report it. */
 export interface SessiongraphSessionSummary {
   sessionId: SessiongraphSessionId
+  /** Which harness wrote this session's log. */
+  source: SessiongraphSource
   title: string | undefined
   workspace: string
   /** Epoch milliseconds of the session's first event. */
@@ -200,6 +226,8 @@ export interface SessiongraphTimelineRequest extends SessiongraphRequestBase {
   operation: 'timeline'
   /** Restrict to one workspace, or a path prefix when it ends without a trailing slash. */
   workspace?: string
+  /** Restrict to one harness's sessions. Absent means every source. */
+  source?: SessiongraphSource
   /** Only sessions whose last event is at or after this epoch-millisecond timestamp. */
   after?: number
   /** Only sessions whose first event is at or before this epoch-millisecond timestamp. */
@@ -221,6 +249,8 @@ export interface SessiongraphTimelineResult {
 /** Enumerate the workspaces the index covers. */
 export interface SessiongraphWorkspacesRequest extends SessiongraphRequestBase {
   operation: 'workspaces'
+  /** Restrict the census to one harness's sessions. Absent means every source. */
+  source?: SessiongraphSource
   /** Maximum workspaces to return, most recently active first. */
   limit: number
   /** Workspaces to skip, for paging; follows the most-recently-active-first order. */

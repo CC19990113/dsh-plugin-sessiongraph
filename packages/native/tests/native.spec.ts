@@ -103,11 +103,11 @@ function seedLiveRow(sessionId: string, text: string): void {
     database
       .prepare(
         `INSERT INTO session
-           (id, workspace, title, created_at, last_at, parent_session, origin, agent_preset, turns,
-            entries, source_path, source_mtime, source_size)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, source, workspace, title, created_at, last_at, parent_session, origin, agent_preset,
+            turns, entries, source_path, source_mtime, source_size)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(sessionId, '/Users/admin/www/live', null, 1, 2, null, 'user', null, 0, 1, `live://${sessionId}`, 0, 0)
+      .run(sessionId, 'dsh', '/Users/admin/www/live', null, 1, 2, null, 'user', null, 0, 1, `live://${sessionId}`, 0, 0)
     const inserted = database
       .prepare('INSERT INTO entry (session_id, seq, time, turn, kind, text, clipped) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(sessionId, 1, 2, null, 'user', text, 0)
@@ -161,7 +161,7 @@ describe('native index kernel', () => {
 
     const database = openIndex()
     try {
-      expect(database.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version')).toEqual({ value: '2' })
+      expect(database.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version')).toEqual({ value: '3' })
       expect(database.prepare('SELECT value FROM meta WHERE key = ?').get('discovered')).toEqual({ value: '3' })
       expect(database.prepare('SELECT value FROM meta WHERE key = ?').get('failed')).toEqual({ value: '0' })
       expect(database.prepare('SELECT value FROM meta WHERE key = ?').get('indexed_at')).toBeTruthy()
@@ -210,7 +210,7 @@ describe('native index kernel', () => {
     }
 
     const status = JSON.parse(readFileSync(join(indexRoot, 'status.json'), 'utf8')) as Record<string, unknown>
-    expect(status).toMatchObject({ schemaVersion: 2, sessions: 3, entries: 6, workspaces: 2, bytes: report.bytes })
+    expect(status).toMatchObject({ schemaVersion: 3, sessions: 3, entries: 6, workspaces: 2, bytes: report.bytes })
     expect(status.indexedAt).toBeGreaterThan(0)
 
     expect(existsSync(`${indexPath}.tmp`)).toBe(false)
