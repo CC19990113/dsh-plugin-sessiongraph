@@ -65,6 +65,22 @@ importers:
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.5
+    optionalDependencies:
+      dsh-plugin-sessiongraph-indexer-darwin-arm64:
+        specifier: 0.3.0
+        version: 0.3.0
+      dsh-plugin-sessiongraph-indexer-darwin-x64:
+        specifier: 0.3.0
+        version: 0.3.0
+      dsh-plugin-sessiongraph-indexer-linux-arm64-gnu:
+        specifier: 0.3.0
+        version: 0.3.0
+      dsh-plugin-sessiongraph-indexer-linux-x64-gnu:
+        specifier: 0.3.0
+        version: 0.3.0
+      dsh-plugin-sessiongraph-indexer-win32-x64-msvc:
+        specifier: 0.3.0
+        version: 0.3.0
 
   packages/panel:
     dependencies:
@@ -503,6 +519,31 @@ packages:
   detect-libc@2.1.2:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
+
+  dsh-plugin-sessiongraph-indexer-darwin-arm64@0.3.0:
+    resolution: {integrity: sha512-a2rLS3d+PEduLMjwWBdLVUYeX5pf1Lwxm98QHMvhs/4kv7Phny5u6KPwXE0WePSnjGEPomBGGWiMeztm3SfB2w==}
+    cpu: [arm64]
+    os: [darwin]
+
+  dsh-plugin-sessiongraph-indexer-darwin-x64@0.3.0:
+    resolution: {integrity: sha512-jkA2Sa7uVNlWMkYUt4pQLxszS5kutitkVL2zHmR0HIY8BbKQRdFR9hgbwinLSdg0QPG5oWRKE/5eG+lAcFA1Zw==}
+    cpu: [x64]
+    os: [darwin]
+
+  dsh-plugin-sessiongraph-indexer-linux-arm64-gnu@0.3.0:
+    resolution: {integrity: sha512-ONNqJBFr9QWCentF0g7eiNEBdlm/2qY+7p8rOpIUROE7t/wL5k1TQgBZ5kUH70WK7OQN/YFsggoyqSfH0kcmTQ==}
+    cpu: [arm64]
+    os: [linux]
+
+  dsh-plugin-sessiongraph-indexer-linux-x64-gnu@0.3.0:
+    resolution: {integrity: sha512-AD+FYTRmglt+7in1yoxhCvWN06erXv+32wQcZGNAlgCgdP/YENUvdytKMlRW4lwAcS2+ui7EksBXT7U/C7Z1XA==}
+    cpu: [x64]
+    os: [linux]
+
+  dsh-plugin-sessiongraph-indexer-win32-x64-msvc@0.3.0:
+    resolution: {integrity: sha512-VWpB0rfeTXhKE85wxdvfw2eQ1zojOb6iYAdwMORqcft90pqZ0GaiVg51uQftpaP4v1oATZtnf6i5r65JBwpbsQ==}
+    cpu: [x64]
+    os: [win32]
 
   es-module-lexer@2.3.2:
     resolution: {integrity: sha512-poHGpORABojJJucnV9KbOavETW8lBVnphkW77ER5/BQ5Fz7oXSoCNek7IH3vR5nRjdsEz926ibFYX8KtLQmdyw==}
@@ -1096,6 +1137,21 @@ snapshots:
       ms: 2.1.3
 
   detect-libc@2.1.2: {}
+
+  dsh-plugin-sessiongraph-indexer-darwin-arm64@0.3.0:
+    optional: true
+
+  dsh-plugin-sessiongraph-indexer-darwin-x64@0.3.0:
+    optional: true
+
+  dsh-plugin-sessiongraph-indexer-linux-arm64-gnu@0.3.0:
+    optional: true
+
+  dsh-plugin-sessiongraph-indexer-linux-x64-gnu@0.3.0:
+    optional: true
+
+  dsh-plugin-sessiongraph-indexer-win32-x64-msvc@0.3.0:
+    optional: true
 
   es-module-lexer@2.3.2: {}
 
