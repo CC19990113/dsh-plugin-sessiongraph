@@ -282,7 +282,10 @@ pub fn parse_jsonl(text: &str, fallback_id: &str, limits: &ParseLimits) -> Parse
 }
 
 /// Append one bounded entry, unless its text is blank.
-fn push_entry(
+///
+/// Shared with the Codex reader: two parsers writing entries must apply one clipping and blank-text
+/// policy, or the same sentence would be stored differently depending on which harness recorded it.
+pub(crate) fn push_entry(
     entries: &mut Vec<ParsedEntry>,
     kind: &'static str,
     text: String,
@@ -352,18 +355,18 @@ fn argument_text(value: Option<&Value>) -> String {
 }
 
 /// Parse one JSONL line into a JSON object, tolerating a corrupt line.
-fn parse_record(line: &str) -> Option<Value> {
+pub(crate) fn parse_record(line: &str) -> Option<Value> {
     let value: Value = serde_json::from_str(line).ok()?;
     value.is_object().then_some(value)
 }
 
 /// Read a string field from a value that may not be an object.
-fn string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+pub(crate) fn string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
 
 /// Read a finite numeric field, truncated to an integer for storage.
-fn number_field(value: &Value, key: &str) -> Option<i64> {
+pub(crate) fn number_field(value: &Value, key: &str) -> Option<i64> {
     let value = value.get(key)?;
     if let Some(integer) = value.as_i64() {
         return Some(integer);

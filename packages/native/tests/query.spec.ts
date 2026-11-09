@@ -91,7 +91,7 @@ async function seedFixture(): Promise<void> {
     header('dup-alpha-two', '/Users/admin/www/demo'),
     { type: 'user/message', seq: 1, time: 1_700_000_000_700, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '重复前缀乙' }] } },
   ])
-  const report = await kernel!.indexSessions({ sessionsRoot, indexPath })
+  const report = await kernel!.indexSessions({ sessionsRoot, codex: false, indexPath })
   expect(report.sessions).toBe(4)
 }
 

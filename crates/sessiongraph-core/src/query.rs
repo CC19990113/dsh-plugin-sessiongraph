@@ -1953,12 +1953,14 @@ mod tests {
                         entry("tool", "广告 三号", 2, 30),
                     ],
                 ),
+                source: "dsh",
                 source_path: main_log.to_string_lossy().into_owned(),
                 mtime: 1,
                 size: 1,
             },
             IndexedSession {
                 session: parsed("bbbb-2", "/w2", vec![entry("user", "广告 四号", 0, 40)]),
+                source: "dsh",
                 source_path: fixture
                     .dir
                     .join("bbbb.jsonl.zstd")
@@ -1969,18 +1971,21 @@ mod tests {
             },
             IndexedSession {
                 session: parsed("dup-a1", "/w1", Vec::new()),
+                source: "dsh",
                 source_path: "dup-a1".to_owned(),
                 mtime: 1,
                 size: 1,
             },
             IndexedSession {
                 session: parsed("dup-a2", "/w1", Vec::new()),
+                source: "dsh",
                 source_path: "dup-a2".to_owned(),
                 mtime: 1,
                 size: 1,
             },
             IndexedSession {
                 session: parsed("solo-9", "/w2", Vec::new()),
+                source: "dsh",
                 source_path: "solo-9".to_owned(),
                 mtime: 1,
                 size: 1,
@@ -1992,6 +1997,7 @@ mod tests {
                     row.last_at = 10;
                     row
                 },
+                source: "dsh",
                 source_path: "parent-0".to_owned(),
                 mtime: 1,
                 size: 1,
@@ -2004,6 +2010,7 @@ mod tests {
                     row.last_at = 11;
                     row
                 },
+                source: "dsh",
                 source_path: "child-1".to_owned(),
                 mtime: 1,
                 size: 1,
@@ -2016,6 +2023,7 @@ mod tests {
                     row.last_at = 12;
                     row
                 },
+                source: "dsh",
                 source_path: "child-2".to_owned(),
                 mtime: 1,
                 size: 1,
@@ -2028,12 +2036,14 @@ mod tests {
                     row.last_at = 13;
                     row
                 },
+                source: "dsh",
                 source_path: "grand-3".to_owned(),
                 mtime: 1,
                 size: 1,
             },
             IndexedSession {
                 session: parsed("rep-0", "/w1", Vec::new()),
+                source: "dsh",
                 source_path: replace_log.to_string_lossy().into_owned(),
                 mtime: 1,
                 size: 1,

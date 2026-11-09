@@ -1,10 +1,15 @@
 //! Native index kernel for the sessiongraph plugin, exposed to Node through napi-rs.
 //!
-//! The kernel turns `~/.dsh/sessions` into the SQLite index the store reads: scan, decompress the
-//! multi-frame zstd JSONL logs, extract the readable conversation, and write one transaction. It is
-//! a port of `packages/sessions` — the TS indexer remains the behavioural reference, and every
-//! rule that has to match (the tokenizer, the parse rules, the schema, the incremental key) is
-//! mirrored here deliberately rather than reinvented.
+//! The kernel turns `~/.dsh/sessions` **and `~/.codex`** into the SQLite index the store reads:
+//! scan both stores, decompress the multi-frame zstd JSONL logs, extract the readable conversation,
+//! and write one transaction. It is a port of `packages/sessions` — the TS indexer remains the
+//! behavioural reference, and every rule that has to match (the tokenizer, the parse rules, the
+//! schema, the incremental key) is mirrored here deliberately rather than reinvented.
+//!
+//! Both sources land in one index, discriminated by `session.source`, because a question about a
+//! project is answered by both harnesses ("what did I decide about this repo" does not care which
+//! agent was driving). The two readers differ only in how they walk a line — [`parse`] for DSH's
+//! flat events, [`codex`] for Codex's envelopes — and converge on one `ParsedSession`.
 //!
 //! ## JS field names
 //!
@@ -22,6 +27,7 @@ use napi::{bindgen_prelude::AsyncTask, Env, Task};
 use napi_derive::napi;
 use rayon::prelude::*;
 
+pub mod codex;
 pub mod decode;
 pub mod parse;
 pub mod query;
@@ -54,6 +60,13 @@ pub struct IndexOptions {
     pub workspace_filter: Option<String>,
     /// Index only one session, by full id or unambiguous prefix.
     pub session_filter: Option<String>,
+    /// Also index OpenAI Codex's rollout logs (default true).
+    ///
+    /// One index spans both harnesses because a question about a project is answered by both; set
+    /// this false on a machine where Codex's history is not wanted, and the next run drops its rows.
+    pub codex: Option<bool>,
+    /// Codex home directory the rollout logs are read from (default `~/.codex`).
+    pub codex_root: Option<String>,
     /// Longest message text stored whole (default 4000).
     pub max_entry_chars: Option<u32>,
     /// Longest tool invocation text stored whole (default 2000).
@@ -164,6 +177,9 @@ struct ResolvedOptions {
     force: bool,
     workspace_filter: Option<String>,
     session_filter: Option<String>,
+    /// Codex home to scan, or `None` when the source is off **or** this machine does not say where
+    /// home is — guessing a path there would scan a tree that is not the user's Codex history.
+    codex_root: Option<PathBuf>,
     limits: parse::ParseLimits,
     max_file_bytes: u64,
 }
@@ -193,12 +209,21 @@ impl ResolvedOptions {
             }
             Some(value) => value.floor() as u64,
         };
+        let codex_root = match options.codex_root {
+            Some(root) if !root.is_empty() => Some(PathBuf::from(root)),
+            _ => default_codex_root(),
+        };
         Ok(Self {
             sessions_root: PathBuf::from(options.sessions_root),
             index_path: PathBuf::from(options.index_path),
             force: options.force.unwrap_or(false),
             workspace_filter: options.workspace_filter,
             session_filter: options.session_filter,
+            codex_root: if options.codex.unwrap_or(true) {
+                codex_root
+            } else {
+                None
+            },
             limits: parse::ParseLimits {
                 max_entry_chars: max_entry_chars as usize,
                 tool_call_chars: tool_call_chars as usize,
@@ -213,11 +238,38 @@ impl ResolvedOptions {
     }
 }
 
+/// Default Codex home, resolved from the environment.
+///
+/// No path crate is a dependency of this build, and `HOME`/`USERPROFILE` is what the TypeScript
+/// indexer's `os.homedir()` ultimately reads too. `None` means this machine does not say where home
+/// is, which disables the Codex source rather than scanning a relative `.codex` in the process's
+/// working directory.
+fn default_codex_root() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join(".codex"))
+}
+
 /// Build or refresh one index.
 fn run_index(options: IndexOptions) -> Result<IndexReport, String> {
     let started = Instant::now();
     let resolved = ResolvedOptions::resolve(options)?;
-    let files = scan::scan_sessions(&resolved.sessions_root)?;
+    let harness_files = scan::scan_sessions(&resolved.sessions_root)?;
+    // A machine that never ran Codex contributes nothing, not a failed run — the same tolerance the
+    // harness scan applies to a store that does not exist yet.
+    let codex_files = match &resolved.codex_root {
+        Some(root) => scan::scan_codex_sessions(root)?,
+        None => Vec::new(),
+    };
+    // Titles come from a second Codex file and are read once per run, so the parsers stay pure
+    // functions of the bytes they are handed. Nothing to read when no rollout was found.
+    let titles = match &resolved.codex_root {
+        Some(root) if !codex_files.is_empty() => scan::read_codex_titles(root),
+        _ => HashMap::new(),
+    };
+    let mut files = harness_files;
+    files.extend(codex_files);
+    let discovered = files.len();
     let previous = write::read_index_state(&resolved.index_path);
     // A missing or unusable previous index is rebuilt through the temporary file too, so a corrupt
     // or schema-mismatched file is replaced atomically instead of being written into.
@@ -258,12 +310,24 @@ fn run_index(options: IndexOptions) -> Result<IndexReport, String> {
 
     // Reading, decompressing and parsing are the expensive half and are per-file independent, so
     // they run on the rayon pool; `collect` keeps scan order, which makes the report reproducible.
+    // The parser is chosen by source: the two harnesses record a conversation in different shapes,
+    // and only the shape decides how a line is read.
     let outcomes: Vec<Result<parse::ParsedSession, String>> = pending
         .par_iter()
         .map(|file| {
             let buffer = std::fs::read(&file.file_path)
                 .map_err(|error| format!("read: {error}"))?;
-            parse::parse_session_log(&buffer, &scan::fallback_id(file), &resolved.limits)
+            match file.source {
+                scan::SessionSource::Dsh => {
+                    parse::parse_session_log(&buffer, &scan::fallback_id(file), &resolved.limits)
+                }
+                scan::SessionSource::Codex => codex::parse_codex_log(
+                    &buffer,
+                    &codex::codex_fallback_id(&file.file_path),
+                    &resolved.limits,
+                    &titles,
+                ),
+            }
         })
         .collect();
 
@@ -284,13 +348,17 @@ fn run_index(options: IndexOptions) -> Result<IndexReport, String> {
             continue;
         }
         match by_id.get(&session.id).copied() {
-            // One session id reachable through two files (a v3 → v4 migration, or a workspace move)
-            // must contribute one session row: the newer source wins and the stale one is reported
-            // as skipped rather than written and immediately deleted.
+            // One session id reachable through two files must contribute one session row. Since the
+            // Codex reader arrived there are two ways that happens: a v3 → v4 migration or workspace
+            // move in this harness, and a rollout Codex copied into `archived_sessions/` while the
+            // original is still under `sessions/`. The copy that reaches further wins — `last_at`,
+            // not mtime — because "the session committed is the most complete one" is what a query
+            // about it should answer, and that is the rule the TypeScript indexer applies.
             Some(index) => {
-                if file.mtime > candidates[index].mtime {
+                if session.last_at >= candidates[index].session.last_at {
                     candidates[index] = write::IndexedSession {
                         session,
+                        source: file.source.as_str(),
                         source_path: file.file_path.to_string_lossy().into_owned(),
                         mtime: file.mtime,
                         size: file.size,
@@ -302,6 +370,7 @@ fn run_index(options: IndexOptions) -> Result<IndexReport, String> {
                 by_id.insert(session.id.clone(), candidates.len());
                 candidates.push(write::IndexedSession {
                     session,
+                    source: file.source.as_str(),
                     source_path: file.file_path.to_string_lossy().into_owned(),
                     mtime: file.mtime,
                     size: file.size,
@@ -347,7 +416,7 @@ fn run_index(options: IndexOptions) -> Result<IndexReport, String> {
         preserve_existing: scoped && previous.is_some(),
         sessions: &candidates,
         removed: &removed,
-        discovered: files.len(),
+        discovered,
         failed: failed.len(),
         indexed_at,
     })?;
@@ -360,7 +429,7 @@ fn run_index(options: IndexOptions) -> Result<IndexReport, String> {
         removed: u32::try_from(removed.len()).unwrap_or(u32::MAX),
         live_sessions: 0,
         live_skipped: 0,
-        discovered: u32::try_from(files.len()).unwrap_or(u32::MAX),
+        discovered: u32::try_from(discovered).unwrap_or(u32::MAX),
         failed,
         entries: u32::try_from(summary.entries).unwrap_or(u32::MAX),
         sessions: u32::try_from(summary.sessions).unwrap_or(u32::MAX),
@@ -411,7 +480,44 @@ fn now_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{matches_session, matches_workspace, truncate_reason};
+    use std::path::PathBuf;
+
+    use super::{matches_session, matches_workspace, truncate_reason, IndexOptions, ResolvedOptions};
+
+    /// One option set, with every switch but the Codex pair left at its default.
+    fn options(codex: Option<bool>, codex_root: Option<&str>) -> IndexOptions {
+        IndexOptions {
+            sessions_root: "/sessions".to_owned(),
+            index_path: "/index/index.db".to_owned(),
+            force: None,
+            workspace_filter: None,
+            session_filter: None,
+            codex,
+            codex_root: codex_root.map(str::to_owned),
+            max_entry_chars: None,
+            tool_call_chars: None,
+            max_file_bytes: None,
+        }
+    }
+
+    #[test]
+    fn codex_is_on_by_default_and_rooted_at_home() {
+        // Default on: a machine that has Codex history should get it without a config change, and
+        // the root has to come from the environment rather than the process's working directory.
+        let resolved = ResolvedOptions::resolve(options(None, None)).expect("resolve");
+        assert_eq!(
+            resolved.codex_root,
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex"))
+        );
+
+        // Off means the scan is skipped entirely, not merely rooted somewhere else.
+        let off = ResolvedOptions::resolve(options(Some(false), Some("/tmp/codex"))).expect("resolve");
+        assert_eq!(off.codex_root, None);
+
+        // An explicit root wins over the default.
+        let custom = ResolvedOptions::resolve(options(Some(true), Some("/tmp/codex"))).expect("resolve");
+        assert_eq!(custom.codex_root, Some(PathBuf::from("/tmp/codex")));
+    }
 
     #[test]
     fn workspace_filter_is_exact_or_prefix() {

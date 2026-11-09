@@ -781,13 +781,14 @@ function resolveNativeEngine(setting: SessiongraphEngineSetting): NativeKernel |
 /**
  * Run one index through the native kernel, then apply the live-session pass on top.
  *
- * The kernel is synchronous and covers the file path only — it has no access to the host's
- * `sessionQuery`, so its report always says zero live sessions. The live pass is therefore shared
- * with the TypeScript path and its numbers overwrite the kernel's.
+ * The kernel covers the file path only — it has no access to the host's `sessionQuery`, so its
+ * report always says zero live sessions. The live pass is therefore shared with the TypeScript path
+ * and its numbers overwrite the kernel's.
  * @param native - the loaded kernel.
  * @param indexPath - absolute path of the index file.
  * @param options - scope and rebuild switches.
  * @param config - the resolved plugin configuration.
+ * @param codexOn - whether this run indexes Codex's history too (kernel option `codex`).
  * @param inScope - whether a session is in the run's scope.
  * @param ctx - the plugin context, consulted for the optional live-session source.
  * @param signal - aborts before the kernel starts.
@@ -799,6 +800,7 @@ async function runNativeEngine(
   indexPath: string,
   options: SessiongraphIndexOptions,
   config: ResolvedConfig,
+  codexOn: boolean,
   inScope: (workspace: string, sessionId: string) => boolean,
   ctx: Context | undefined,
   signal: AbortSignal | undefined,
@@ -813,6 +815,10 @@ async function runNativeEngine(
       ...(options.force === undefined ? {} : { force: options.force }),
       ...(options.workspace === undefined ? {} : { workspaceFilter: options.workspace }),
       ...(options.sessionId === undefined ? {} : { sessionFilter: options.sessionId }),
+      // The kernel reads both harness stores itself, so a Codex-enabled run still takes this path;
+      // the panel switch is resolved here because the kernel has no way to read `panel.json`.
+      codex: codexOn,
+      codexRoot: config.codexRoot,
       maxEntryChars: config.maxEntryChars,
       toolCallChars: config.toolCallChars,
       maxFileBytes: config.maxFileBytes,
@@ -971,22 +977,20 @@ async function runIndexUnlocked(
   // `auto` prefers the kernel and falls back silently; `native` asks for it explicitly, so a machine
   // without a usable build is told why it got TypeScript results instead.
   //
-  // The kernel indexes DSH's own logs only — it has no Codex reader — so a run that must include
-  // Codex's history takes the TypeScript path. Silently answering half the corpus would be worse than
-  // the slower engine, and a user who pinned `native` deserves to know why it did not run.
+  // Both harness stores are the kernel's own concern: it scans and parses DSH's logs and Codex's
+  // rollouts in one run, so enabling Codex no longer costs the fast engine. The switch still has to
+  // be resolved here because the panel file is this package's, not the kernel's.
   const codexOn = codexEnabled(indexRoot, config)
-  const codexPending = codexOn && (await scanCodexSessions(config.codexRoot)).length > 0
-  const native = codexPending ? undefined : resolveNativeEngine(config.engine)
+  const native = resolveNativeEngine(config.engine)
   if (native !== undefined) {
-    const nativeReport = await runNativeEngine(native, indexPath, options, config, inScope, ctx, signal, startedAt)
+    const nativeReport = await runNativeEngine(
+      native, indexPath, options, config, codexOn, inScope, ctx, signal, startedAt,
+    )
     if (nativeReport !== undefined) return nativeReport
   } else if (config.engine === 'native') {
     console.error(
-      codexPending
-        ? 'sessiongraph-sessions: the native index engine cannot read Codex rollout logs; ' +
-            'using the TypeScript engine for this run'
-        : 'sessiongraph-sessions: the native index engine is unavailable on this machine; ' +
-            'falling back to the TypeScript engine',
+      'sessiongraph-sessions: the native index engine is unavailable on this machine; ' +
+        'falling back to the TypeScript engine',
     )
   }
 

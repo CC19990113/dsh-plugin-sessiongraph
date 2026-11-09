@@ -27,6 +27,15 @@ export interface NativeIndexOptions {
   workspaceFilter?: string
   /** Index only one session, by full id or unambiguous prefix. */
   sessionFilter?: string
+  /**
+   * Index OpenAI Codex's rollout logs as well (default true).
+   *
+   * Both harnesses' conversations land in one index, discriminated by `session.source`. False drops
+   * Codex's rows on the next run instead of merely stopping new ones.
+   */
+  codex?: boolean
+  /** Codex home directory the rollout logs are read from (default `~/.codex`). */
+  codexRoot?: string
   /** Longest message text stored whole (default 4000). */
   maxEntryChars?: number
   /** Longest tool invocation text stored whole (default 2000). */

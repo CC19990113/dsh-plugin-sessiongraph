@@ -134,7 +134,7 @@ describe('loadNative', () => {
 describe('native index kernel', () => {
   it.skipIf(kernel === undefined)('writes the shared schema and a matching status sidecar', async () => {
     await seedFixture()
-    const report = await kernel!.indexSessions({ sessionsRoot, indexPath })
+    const report = await kernel!.indexSessions({ sessionsRoot, codex: false, indexPath })
 
     // camelCase is what napi-rs produces from the Rust snake_case fields; the loader's types and
     // the seam's SessiongraphIndexReport both rely on it.
@@ -218,10 +218,10 @@ describe('native index kernel', () => {
 
   it.skipIf(kernel === undefined)('is incremental and re-writes only changed sources', async () => {
     const files = await seedFixture()
-    const first = await kernel!.indexSessions({ sessionsRoot, indexPath })
+    const first = await kernel!.indexSessions({ sessionsRoot, codex: false, indexPath })
     expect(first.added).toBe(3)
 
-    const second = await kernel!.indexSessions({ sessionsRoot, indexPath })
+    const second = await kernel!.indexSessions({ sessionsRoot, codex: false, indexPath })
     expect(second.added).toBe(0)
     expect(second.updated).toBe(0)
     expect(second.skipped).toBe(3)
@@ -236,7 +236,7 @@ describe('native index kernel', () => {
         ),
       ),
     )
-    const third = await kernel!.indexSessions({ sessionsRoot, indexPath })
+    const third = await kernel!.indexSessions({ sessionsRoot, codex: false, indexPath })
     expect(third.updated).toBe(1)
     expect(third.skipped).toBe(2)
     expect(third.sessions).toBe(3)
@@ -246,10 +246,10 @@ describe('native index kernel', () => {
 
   it.skipIf(kernel === undefined)('removes sessions whose source file disappeared', async () => {
     const files = await seedFixture()
-    await kernel!.indexSessions({ sessionsRoot, indexPath })
+    await kernel!.indexSessions({ sessionsRoot, codex: false, indexPath })
 
     await rm(files.c)
-    const report = await kernel!.indexSessions({ sessionsRoot, indexPath })
+    const report = await kernel!.indexSessions({ sessionsRoot, codex: false, indexPath })
     expect(report.discovered).toBe(2)
     expect(report.removed).toBe(1)
     expect(report.sessions).toBe(2)
@@ -266,11 +266,12 @@ describe('native index kernel', () => {
 
   it.skipIf(kernel === undefined)('force rebuilds through index.db.tmp and keeps out-of-scope rows', async () => {
     await seedFixture()
-    await kernel!.indexSessions({ sessionsRoot, indexPath })
+    await kernel!.indexSessions({ sessionsRoot, codex: false, indexPath })
 
     const report = await kernel!.indexSessions({
       sessionsRoot,
       indexPath,
+      codex: false,
       force: true,
       workspaceFilter: '/Users/admin/www/demo',
     })
@@ -299,7 +300,7 @@ describe('native index kernel', () => {
       { type: 'tool/call', seq: 2, time: 2, data: { name: 'tool', arguments: long } },
     ])
 
-    const report = await kernel!.indexSessions({ sessionsRoot, indexPath, maxEntryChars: 20, toolCallChars: 10 })
+    const report = await kernel!.indexSessions({ sessionsRoot, codex: false, indexPath, maxEntryChars: 20, toolCallChars: 10 })
     expect(report.entries).toBe(2)
 
     const database = openIndex()
@@ -315,7 +316,7 @@ describe('native index kernel', () => {
     }
 
     // A log larger than the cap is reported, not parsed, and the run still writes a valid index.
-    const capped = await kernel!.indexSessions({ sessionsRoot, indexPath, force: true, maxFileBytes: 10 })
+    const capped = await kernel!.indexSessions({ sessionsRoot, codex: false, indexPath, force: true, maxFileBytes: 10 })
     expect(capped.failed).toHaveLength(1)
     expect(capped.failed[0]!.reason).toContain('maxFileBytes')
     expect(capped.failed[0]!.reason.length).toBeLessThanOrEqual(200)
@@ -336,7 +337,7 @@ describe('native index kernel', () => {
       humanMessage(1, 1, 'newer copy'),
     ])
 
-    const report = await kernel!.indexSessions({ sessionsRoot, indexPath })
+    const report = await kernel!.indexSessions({ sessionsRoot, codex: false, indexPath })
     expect(report.discovered).toBe(2)
     expect(report.sessions).toBe(1)
     expect(report.entries).toBe(1)
@@ -356,10 +357,10 @@ describe('native index kernel', () => {
 
   it.skipIf(kernel === undefined)('preserves live rows written by the caller\'s live pass', async () => {
     await seedFixture()
-    await kernel!.indexSessions({ sessionsRoot, indexPath })
+    await kernel!.indexSessions({ sessionsRoot, codex: false, indexPath })
     seedLiveRow('live-session-1', '实时会话里的广告改动')
 
-    const report = await kernel!.indexSessions({ sessionsRoot, indexPath })
+    const report = await kernel!.indexSessions({ sessionsRoot, codex: false, indexPath })
     // A file scan cannot see a live session, so "not in this scan" must not delete it.
     expect(report.removed).toBe(0)
     expect(report.skipped).toBe(3)
@@ -381,12 +382,66 @@ describe('native index kernel', () => {
   })
 
   it.skipIf(kernel === undefined)('treats a missing sessions root as an empty index', async () => {
-    const report = await kernel!.indexSessions({ sessionsRoot: join(work, 'never-existed'), indexPath })
+    const report = await kernel!.indexSessions({ sessionsRoot: join(work, 'never-existed'), indexPath, codex: false })
     expect(report.discovered).toBe(0)
     expect(report.sessions).toBe(0)
     expect(report.entries).toBe(0)
     expect(existsSync(indexPath)).toBe(true)
     expect(JSON.parse(await readFile(join(indexRoot, 'status.json'), 'utf8'))).toMatchObject({ sessions: 0, entries: 0 })
+  })
+
+  it.skipIf(kernel === undefined)('indexes Codex rollout logs when the source is on', async () => {
+    // Codex keeps a conversation in `archived_sessions/` after copying it into the date-nested
+    // `sessions/` store, so one id can arrive from two files; the kernel must write one row.
+    const codexRoot = join(work, 'codex')
+    const archived = join(codexRoot, 'archived_sessions')
+    const nested = join(codexRoot, 'sessions', '2026', '03', '27')
+    await mkdir(archived, { recursive: true })
+    await mkdir(nested, { recursive: true })
+
+    const rollout = (sessionId: string, cwd: string, text: string): Buffer =>
+      zstdCompressSync(Buffer.from([
+        {
+          timestamp: '2026-03-27T09:26:43.746Z',
+          ordinal: 0,
+          type: 'session_meta',
+          payload: { session_id: sessionId, cwd, timestamp: '2026-03-27T09:26:43.746Z', originator: 'Codex Desktop' },
+        },
+        { timestamp: '2026-03-27T09:26:44.000Z', ordinal: 1, type: 'turn_context', payload: { turn_id: 't1', model: 'gpt-5' } },
+        {
+          timestamp: '2026-03-27T09:26:45.000Z',
+          ordinal: 2,
+          type: 'response_item',
+          payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] },
+        },
+      ].map(line => `${JSON.stringify(line)}\n`).join('')))
+
+    const name = 'rollout-2026-03-27T09-26-43-019d2d03-6b7c-7f50-94f2-0df2a1c99a49.jsonl.zst'
+    await writeFile(join(archived, name), rollout('cod-1', '/Users/admin/www/codex-demo', '广告投放复盘'))
+    await writeFile(join(nested, name), rollout('cod-1', '/Users/admin/www/codex-demo', '广告投放复盘'))
+
+    const report = await kernel!.indexSessions({ sessionsRoot, indexPath, codex: true, codexRoot })
+    expect(report.discovered).toBe(2)
+    expect(report.sessions).toBe(1)
+    expect(report.failed).toEqual([])
+
+    const database = openIndex()
+    try {
+      // `session.source` is what tells the two harnesses apart in one index; the previous kernel
+      // hard-coded `'dsh'` into the INSERT.
+      expect(database.prepare('SELECT source, workspace, origin, agent_preset, turns FROM session').all()).toEqual([
+        { source: 'codex', workspace: '/Users/admin/www/codex-demo', origin: 'Codex Desktop', agent_preset: 'gpt-5', turns: 1 },
+      ])
+      expect(database.prepare('SELECT kind, text FROM entry').all()).toEqual([{ kind: 'user', text: '广告投放复盘' }])
+    } finally {
+      database.close()
+    }
+
+    // Turning the source off drops the rows on the next run instead of only stopping new ones.
+    const off = await kernel!.indexSessions({ sessionsRoot, indexPath, codex: false })
+    expect(off.discovered).toBe(0)
+    expect(off.removed).toBe(1)
+    expect(off.sessions).toBe(0)
   })
 })
 

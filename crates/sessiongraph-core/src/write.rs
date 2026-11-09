@@ -124,6 +124,11 @@ pub type ExistingIndex = HashMap<String, ExistingSession>;
 /// One parsed session paired with the source it came from.
 pub struct IndexedSession {
     pub session: ParsedSession,
+    /// Which harness wrote the log (`"dsh"` or `"codex"`), stored as `session.source`.
+    ///
+    /// The column exists so one index can answer "which agent was driving" without opening the
+    /// source file, and because two harnesses' rows are otherwise indistinguishable by id shape.
+    pub source: &'static str,
     /// Absolute log path, or the synthetic `live://<id>` marker of a live session.
     pub source_path: String,
     /// Source mtime in epoch milliseconds, or 0 for a live session (there is no version to compare).
@@ -350,7 +355,7 @@ fn apply_plan(connection: &Connection, plan: &WritePlan<'_>, preserve: bool) -> 
             "INSERT INTO session
               (id, source, workspace, title, created_at, last_at, parent_session, origin, agent_preset,
                turns, entries, source_path, source_mtime, source_size)
-             VALUES (?1, 'dsh', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )
         .map_err(database_error)?;
     let mut insert_entry = connection
@@ -380,6 +385,7 @@ fn apply_plan(connection: &Connection, plan: &WritePlan<'_>, preserve: bool) -> 
         insert_session
             .execute(params![
                 item.session.id,
+                item.source,
                 item.session.cwd,
                 item.session.title,
                 item.session.created_at,
