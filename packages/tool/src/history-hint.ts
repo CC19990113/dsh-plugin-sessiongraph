@@ -262,11 +262,27 @@ function formatDay(time: number): string {
   return `${month}-${day}`
 }
 
+/**
+ * Prefix DSH put in front of session ids before the v4 log layout dropped it.
+ *
+ * Declared here rather than imported from the store: this module renders text and must not depend on
+ * a database package. A real index holds both spellings at once (385 prefixed against 440 bare), and
+ * shortening a prefixed id without dropping the prefix first prints `session-` for every one of them —
+ * eight characters that name nothing.
+ */
+const SESSION_ID_PREFIX = 'session-'
+
+/** The short id a navigation line prints, resolvable as a prefix either way. */
+function shortSessionId(id: string): string {
+  const bare = id.startsWith(SESSION_ID_PREFIX) ? id.slice(SESSION_ID_PREFIX.length) : id
+  return bare.slice(0, HISTORY_ID_MAX_CHARS)
+}
+
 /** One navigation line: the day, the workspace, the title and the id to read it by. */
 function navigationLine(hit: SessiongraphHit): string {
   const workspace = truncate(basenameOf(hit.workspace), HISTORY_WORKSPACE_MAX_CHARS)
   const title = truncate(hit.title ?? '(无标题)', HISTORY_TITLE_MAX_CHARS)
-  const sessionId = hit.sessionId.slice(0, HISTORY_ID_MAX_CHARS)
+  const sessionId = shortSessionId(hit.sessionId)
   return `· ${formatDay(hit.time)} ${workspace} ${title} · ${sessionId}`
 }
 

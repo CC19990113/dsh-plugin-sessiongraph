@@ -126,6 +126,20 @@ describe('touched paths', () => {
     ])
   })
 
+  it('resolves a bare uuid prefix against a session- prefixed id', async () => {
+    const root = await project({
+      sessions: [{
+        id: 'session-47fbffbd-f327-4976-bbbb-22e40170e525',
+        workspace: WORKSPACE,
+        entries: [tool(1, 1_000, 'read', { file_path: '/tmp/a.ts' })],
+      }],
+    })
+
+    // An index holds both spellings, so the short id the reminder prints has to be resolvable
+    // whichever one it was cut from.
+    expect(ask(root, '47fbffbd').sessionId).toBe('session-47fbffbd-f327-4976-bbbb-22e40170e525')
+  })
+
   it('merges a relative directory path with the absolute path it resolves to', async () => {
     const root = await project(oneSession([
       tool(1, 1_000, 'read', { file_path: `${WORKSPACE}/src` }),

@@ -189,6 +189,29 @@ function escapeLike(value: string): string {
 }
 
 /**
+ * Prefix DSH put in front of session ids before the v4 log layout dropped it.
+ *
+ * Both spellings are indexed alongside each other — a real corpus here held 385 `session-…` ids and
+ * 440 bare uuids — so anything that matches by prefix has to accept either.
+ */
+const SESSION_ID_PREFIX = 'session-'
+
+/**
+ * The two `LIKE` patterns one session-prefix reference can mean.
+ *
+ * A caller who names `47fbffbd` means the session whose id is `47fbffbd-…` *and* the one spelled
+ * `session-47fbffbd-…`; matching only one spelling would make half an index unreachable by the same
+ * short id this tool prints in its own output. An id that already carries the prefix matches the
+ * first pattern and cannot match the second, so asking for both never widens a real reference.
+ * @param reference - the id or prefix the caller named.
+ * @returns the patterns for a bare and a prefixed id, both escaped for `LIKE`.
+ */
+function sessionPrefixPatterns(reference: string): [string, string] {
+  const escaped = escapeLike(reference)
+  return [`${escaped}%`, `${escapeLike(SESSION_ID_PREFIX)}${escaped}%`]
+}
+
+/**
  * Build the workspace predicate for one side of a query.
  *
  * A path that ends with `/` is a PREFIX filter ("everything under this directory"); any other value
@@ -478,8 +501,9 @@ function resolveSessionId(db: DatabaseSync, wanted: string): SessiongraphSession
   if (exact !== undefined) return sessionIdOf(exact)
   const candidates = rows(
     db,
-    `SELECT id FROM session WHERE id LIKE ? ESCAPE '\\' ORDER BY last_at DESC, id ASC LIMIT 8`,
-    [`${escapeLike(reference)}%`],
+    `SELECT id FROM session WHERE id LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\'
+      ORDER BY last_at DESC, id ASC LIMIT 8`,
+    sessionPrefixPatterns(reference),
   )
   if (candidates.length === 0) {
     throw new SessiongraphError(`no indexed session matches "${reference}"`, 'SESSIONGRAPH_NOT_FOUND')
@@ -512,8 +536,9 @@ function resolveSearchedSession(db: DatabaseSync, wanted: string): SessiongraphS
   if (exact !== undefined) return sessionIdOf(exact)
   const candidates = rows(
     db,
-    `SELECT id FROM session WHERE id LIKE ? ESCAPE '\\' ORDER BY last_at DESC, id ASC LIMIT 8`,
-    [`${escapeLike(reference)}%`],
+    `SELECT id FROM session WHERE id LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\'
+      ORDER BY last_at DESC, id ASC LIMIT 8`,
+    sessionPrefixPatterns(reference),
   )
   const [only] = candidates
   if (only === undefined) {
