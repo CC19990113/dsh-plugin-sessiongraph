@@ -11,8 +11,8 @@ minimumReleaseAgeExclude:
   - dsh-plugin-sessiongraph-indexer-linux-arm64-gnu
   - dsh-plugin-sessiongraph-indexer-linux-x64-gnu
   - dsh-plugin-sessiongraph-indexer-win32-x64-msvc
-  - dsh-plugin-sessiongraph-indexer-darwin-arm64@0.3.2
-  - dsh-plugin-sessiongraph-indexer-darwin-x64@0.3.2
-  - dsh-plugin-sessiongraph-indexer-linux-arm64-gnu@0.3.2
-  - dsh-plugin-sessiongraph-indexer-linux-x64-gnu@0.3.2
-  - dsh-plugin-sessiongraph-indexer-win32-x64-msvc@0.3.2
+  - dsh-plugin-sessiongraph-indexer-darwin-arm64@0.3.3
+  - dsh-plugin-sessiongraph-indexer-darwin-x64@0.3.3
+  - dsh-plugin-sessiongraph-indexer-linux-arm64-gnu@0.3.3
+  - dsh-plugin-sessiongraph-indexer-linux-x64-gnu@0.3.3
+  - dsh-plugin-sessiongraph-indexer-win32-x64-msvc@0.3.3
