@@ -191,19 +191,31 @@ export const DEFAULT_FRESHNESS_THRESHOLD_MS = 300_000
 const HISTORY_NAVIGATION_LIMIT = 3
 
 /** The stable system-prompt guidance positioning the session index against grepping session files. */
-export const SESSIONGRAPH_PROMPT_TEXT =
-  '查我自己过去的对话（「上次在哪个会话里说过/做过什么」）用 sessiongraph，不要 grep ~/.dsh/sessions：'
-  + '那里的会话按工作区散在子目录里，是 zstd 压缩的 JSONL，grep 读不到正文，解压全量也慢。'
-  + '手上的摘要不是证据：要引用具体说过什么、跑过什么命令，就在这里查原文。'
-  + '索引同时含两个 agent 的历史：本宿主的 DSH 会话与 OpenAI Codex 的 rollout 日志，'
-  + '每条结果带 source（dsh / codex），需要只看一侧时给 search / timeline / workspaces 传 source。'
-  + 'sessiongraph 从预建索引回答：search 跨会话全文检索（中文按双字切分，两字词即可命中，如「广告」）、'
-  + 'session 按 id 或唯一前缀打开一个会话、event 读某一条原始事件（可带前后窗口）、'
-  + 'trace 追会话血缘或事件的替换/引用关系、timeline 按时间列会话、workspaces 列工作区统计。'
-  + '索引超过几分钟没更新时，查询前会自动跑一次增量刷新（很快，失败也照常回答，只是结果可能少几条）。'
-  + '索引包含正在进行的会话，所以刚才说的话通常也能查到（取决于上次刷新时间）；status 里的实时会话数会随会话启停变化，不是索引坏了。'
-  + '索引不存在时 status 仍能回答，其它操作会失败；要建或全量重建用 operation=index（可带 force），'
-  + '日志很多时它会转成后台 job 并返回 jobId，用 job_output 取报告。'
+export const SESSIONGRAPH_PROMPT_TEXT = `## Past conversation index
+
+\`sessiongraph\` answers questions about what already happened on this machine, from a pre-built SQLite
+index over every past conversation — this harness's own sessions and OpenAI Codex rollouts, in one
+place. Chinese works: CJK is tokenised as overlapping character bigrams, so a two-character term
+matches (\`广告\`).
+
+- **Use it** for "where did we discuss X", "what did we change last time", "which session touched this
+  file", "carry on from where we stopped".
+- **Never grep** \`~/.dsh/sessions\`: those logs are zstd-compressed JSONL, so grep reads nothing.
+- **A memory summary is not evidence.** To quote what was said or which command ran, open the
+  transcript here.
+
+| operation | answers |
+|---|---|
+| \`search\` (default) | full-text search across sessions; filter by session, workspace, source, time |
+| \`session\` | one session by full id or unique prefix |
+| \`event\` | one unabridged raw event, plus an optional window around it |
+| \`trace\` | session lineage, or one event's replacements and citations |
+| \`timeline\` / \`workspaces\` | sessions by time / workspace statistics |
+| \`touched\` | the files one session touched, with counts and tool names |
+| \`status\` / \`index\` | index state / build or refresh an index |
+
+Queries refresh a stale index first, so what was just said is usually already searchable. A missing
+index fails every operation except \`status\`.`
 
 /** Plugin configuration: the defaults and caps the seam requires the consumer to own. */
 export interface Config {

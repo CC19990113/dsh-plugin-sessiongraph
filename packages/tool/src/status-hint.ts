@@ -18,7 +18,7 @@
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { INDEX_RELATIVE_PATH } from 'dsh-plugin-sessiongraph-service'
-import { formatBytes, formatTime } from './render.ts'
+
 
 /**
  * Optional summary an indexer may leave beside `index.db` after a successful run.
@@ -95,26 +95,24 @@ function statFile(path: string): { size: number; mtimeMs: number } | undefined {
 }
 
 /**
- * The state of the session index, phrased for a system prompt.
+ * Whether an index exists for this root, phrased for a system prompt.
+ *
+ * Deliberately says nothing about size or freshness, and that is the whole point: a section whose
+ * `text` is a function is re-evaluated on **every** model request, so any value that moves when the
+ * index is refreshed — session count, entry count, last-build time — rewrites the system prompt and
+ * invalidates its cache on every incremental run. Those facts are one `status` call away, and a caller
+ * who needs them is spending that round-trip anyway. What a prompt can carry for free is the part
+ * that essentially never changes: whether an index exists at all.
  * @param indexRoot - the absolute directory holding the index (`~` already expanded by the caller).
  * @returns one sentence naming the state, or what the model should do about it.
  */
 export function indexStatusHint(indexRoot: string): string {
-  const indexPath = join(indexRoot, INDEX_RELATIVE_PATH)
-  const index = statFile(indexPath)
+  const index = statFile(join(indexRoot, INDEX_RELATIVE_PATH))
   if (index === undefined) {
-    return `这台机器还没有 sessiongraph 索引（${indexPath}）。新会话创建时会在后台自动建一次：`
-      + '它会扫描 ~/.dsh/sessions 下的全部会话，首次可能要几十秒到几分钟，不阻塞会话。'
-      + '要立刻建就调用 sessiongraph 的 index 操作（日志很多时它会转成后台 job 并返回 jobId）；建好之前除 status 外都会失败。'
+    return '**No index yet.** The first session builds one in the background; `operation: "index"` '
+      + 'builds it now. Until then every operation except `status` fails.'
   }
-  const status = readIndexStatus(indexRoot)
-  if (status !== undefined) {
-    return `索引就绪（${indexPath}）：${status.sessions} 个会话、${status.entries} 条可检索条目、`
-      + `${status.workspaces} 个工作区、${formatBytes(status.bytes)}；`
-      + `最近一次建索引 ${formatTime(status.indexedAt)}。`
-  }
-  return `索引文件已存在（${indexPath}，${formatBytes(index.size)}，${formatTime(index.mtimeMs)} 更新），`
-    + '但没有 status 记录——规模与新鲜度用 sessiongraph status 查；怀疑过期时用 sessiongraph 的 index 操作（force）刷新。'
+  return '**Index ready.** `operation: "status"` reports its size and freshness.'
 }
 
 /**

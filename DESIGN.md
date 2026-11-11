@@ -240,7 +240,7 @@ TS 并只记一次日志 —— 与 sessions 索引器的 native 回退策略同
 
 - `sessiongraph`：查询，`timeoutMs` 默认 30s
 - `sessiongraph` (operation `index`)：建/刷新索引，与查询共用 30s 工具预算（大库转 job）
-- 系统提示段（`text` 函数形式）：告诉模型「查本地历史用 sessiongraph，别 grep 会话文件」
+- 系统提示段（`text` 函数形式）：英文 + Markdown（一段说明 + 三条要点 + 一张 operation 表），告诉模型何时用它、别 grep 会话日志。**这一段必须稳定**：`text` 函数每次装配都会重算，所以它只说「有没有索引」这个几乎不变的布尔，**不报规模、不报构建时间**——那些数字每次增量刷新都变，写进提示词等于每刷一次索引就重写一次系统提示、把它的缓存全部作废。要看规模与新鲜度调 `operation: "status"`（`packages/tool/tests/status-hint.spec.ts` 用「两次刷新后字符串必须逐字相同」锁住这条性质）
 - `agent/pre-step` 带路：用户最后一条亲手输入像历史问题时，每个会话**先查一次索引**（300 ms 硬超时），把最多三条「日期 · 工作区 · 标题 · 会话 id」注入上下文；查不到、超时、索引坏一律退回原来那句静态提醒，**永不拒绝该步**。记忆类问题（`偏好` / `喜欢` / `习惯` 等）被 `MEMORY_QUESTION_TERMS` 排除，那属于记忆层（`historyHint: false` 关闭）
 - 参数 schema 用 `@deepseek-ai/schemastery`
 
