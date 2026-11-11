@@ -159,7 +159,7 @@ export const DEFAULT_SESSIONGRAPH_TOOL_TIMEOUT_MS = 30_000
 export const DEFAULT_MAX_LIMIT = 100
 
 /** Default character cap for one rendered snippet or session entry. */
-export const DEFAULT_MAX_SNIPPET_CHARS = 600
+export const DEFAULT_MAX_SNIPPET_CHARS = 400
 
 /**
  * Index size (sessions) at or above which an `index` call is handed to the host's job registry
@@ -350,13 +350,13 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'sessiongraph',
     description:
-      '检索本机全部 agent 会话的历史对话（不是代码）：DSH 自己的会话与 OpenAI Codex 的 rollout 日志索引在同一处，'
-      + '结果带 source（dsh / codex）可按来源过滤。省略 operation 即 search（默认），只传 query 就能跨会话检索。'
-      + '跨会话全文搜索「上次在哪个会话里说过/做过什么」、按 id 打开一个会话、'
-      + '读某一条原始事件、追踪会话血缘或事件的替换/引用关系、按时间列会话、列工作区统计、看索引状态、建/刷新索引。'
-      + '答案来自预建索引，比 grep ~/.dsh/sessions 更快也更完整（那里的 JSONL 是 zstd 压缩的，grep 读不到）。'
-      + '中文按两字词检索即可命中（如「广告」）。索引不存在时除 status 外都会失败，先跑 operation=index；'
-      + '日志很多时 index 会转成后台 job 返回 jobId，用 job_output 取报告。',
+      // The per-operation rundown is deliberately absent: the system-prompt section carries the same
+      // table, and this description is re-sent with every request. What belongs here is only what the
+      // prompt does not say — why to prefer this over grep, and what to do before an index exists.
+      '跨会话检索本机全部 agent 的历史对话（DSH 与 OpenAI Codex，索引在同一处，结果带 source 可过滤）。'
+      + '省略 operation 即 search，只传 query 就能检索。答案来自预建索引：比 grep ~/.dsh/sessions 快得多，'
+      + '那里是 zstd 压缩的 JSONL，grep 读不到。中文两字词即可命中（如「广告」）。'
+      + '索引不存在时除 status 外都会失败，先跑 operation=index；日志很多时 index 转后台 job 返回 jobId，用 job_output 取报告。',
     parameters: SESSIONGRAPH_PARAMETERS,
     output: {
       schema: SESSIONGRAPH_OUTPUT_SCHEMA,

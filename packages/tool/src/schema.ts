@@ -46,7 +46,7 @@ export type SessiongraphQueryOperation = SessiongraphOperation
  */
 export const SESSIONGRAPH_DEFAULT_LIMITS = {
   search: 10,
-  session: 200,
+  session: 50,
   timeline: 20,
   workspaces: 50,
   touched: 50,
@@ -346,91 +346,75 @@ export const SESSIONGRAPH_OUTPUT_SCHEMA = {
  * entry layer), so the common case — a plain cross-session search — names only `query`.
  */
 export const SESSIONGRAPH_PARAMETERS = {
+  // The per-operation rundown lives in the system-prompt table, which is assembled once and already
+  // in front of the model on every request. Repeating it here would buy nothing and cost every
+  // caller a permanent tax on the parameter schema — the enum still names every operation.
   operation: {
     type: 'string',
     enum: [...SESSIONGRAPH_TOOL_OPERATIONS],
-    description:
-      '省略即 search（默认）：只传 query 就是一次跨会话检索。'
-      + 'search（跨会话全文检索）、session（按 id 或唯一前缀读一个会话）、event（读某一条原始事件，含前后窗口）、'
-      + 'trace（追踪会话血缘，或某条事件的替换/引用关系）、timeline（按时间列会话，新→旧）、'
-      + 'workspaces（工作区清单与统计）、touched（一个会话读写过哪些文件/目录，读/编辑/写/read_image/grep/glob 的调用）、'
-      + 'status（索引自身状态）、index（建或刷新索引）。'
-      + 'status 是唯一在还没有索引时也能回答的操作；索引不存在时其它操作会失败，先跑 index。',
+    description: '省略即 search。各 operation 的用途见系统提示的 operation 表；status 是唯一在无索引时也能回答的操作。',
   },
   query: {
     type: 'string',
-    description: 'search 必填：检索词。中文按双字切分，两字词即可命中（例如「广告」）。',
+    description: 'search 必填：检索词。中文按双字切分，两字词即可命中（如「广告」）。',
   },
   session_id: {
     type: 'string',
-    description:
-      'session / event / trace / touched 必填，search 可选：完整会话 id，或长到只指向一个会话的前缀。'
-      + 'search 带上它就在这一个会话里检索；session 打开该会话；touched 列出该会话读写过的文件。',
+    description: 'session / event / trace / touched 必填，search 可选：完整 id 或唯一前缀。',
   },
   seq: {
     type: 'number',
-    description:
-      'event 必填：目标事件的 seq。trace 给出时追踪这一条事件的关系（replacedBy / shadowedSeqs / sourceEventSeqs），'
-      + '省略则追踪会话血缘。',
+    description: 'event 必填；trace 给出时追踪该事件，省略则追踪会话血缘。',
   },
   window_before: {
     type: 'number',
-    description: 'event 可选：额外返回目标事件之前的多少条原始事件摘要（默认 0）。',
+    description: 'event 可选：之前额外几条原始事件，默认 0。',
   },
   window_after: {
     type: 'number',
-    description: 'event 可选：额外返回目标事件之后的多少条原始事件摘要（默认 0）。',
+    description: 'event 可选：之后额外几条原始事件，默认 0。',
   },
   depth: {
     type: 'number',
-    description: 'trace 可选：向下追踪的最大层数；省略表示整棵树。',
+    description: 'trace 可选：最大层数，省略即整棵树。',
   },
   workspace: {
     type: 'string',
-    description: '只看某个工作区：精确的 cwd，或不带结尾斜杠的路径前缀；也可用于 index 限定索引范围。',
+    description: '精确 cwd 或不带结尾斜杠的路径前缀；index 用它可只索引一个工作区。',
   },
   source: {
     type: 'string',
     enum: [...SESSIONGRAPH_SOURCES],
-    description:
-      '只看某个 agent 写的会话：dsh（本宿主 ~/.dsh/sessions）、codex（Codex 的 rollout 日志）。'
-      + '省略即全部来源。search / timeline / workspaces 可用。',
+    description: 'dsh（本宿主）或 codex；省略即全部。search / timeline / workspaces 可用。',
   },
   after: {
     type: 'number',
-    description: '只要这个 epoch 毫秒时间点之后（含）的条目/会话。',
+    description: '只取这个 epoch 毫秒之后（含）的条目/会话。',
   },
   before: {
     type: 'number',
-    description: '只要这个 epoch 毫秒时间点之前（含）的条目/会话。',
+    description: '只取这个 epoch 毫秒之前（含）的条目/会话。',
   },
   kinds: {
     type: 'array',
     items: { type: 'string', enum: [...SESSIONGRAPH_ENTRY_KINDS] },
-    description:
-      '只看这些条目类型：user（人真正打的字）、assistant（模型可见回复）、tool（工具调用的名字与参数）、title（会话标题）。省略即全部。',
+    description: '条目类型：user / assistant / tool / title；省略即全部。',
   },
   dedupe_by_session: {
     type: 'boolean',
-    description:
-      'search 可选：每个会话最多返回一条（最强的那条）。默认 true；只给了 session_id 做单会话检索时默认 false，'
-      + '因为那样只会剩一条结果。',
+    description: 'search 可选：每个会话最多一条。默认 true；带 session_id 时默认 false。',
   },
   limit: {
     type: 'number',
-    description:
-      '最多返回多少条；超出配置上限会被截断。省略按操作给默认值：search 10、timeline 20、workspaces 50、session 200 条 entries、'
-      + 'touched 50 个资源。',
+    description: '省略即用默认值：search 10、timeline 20、workspaces 50、session 50、touched 50；超出配置上限会被截断。',
   },
   offset: {
     type: 'number',
-    description:
-      '跳过前多少条，用于翻页。search、session、timeline、workspaces、touched 五个操作都支持：search 跳过命中、'
-      + 'session 跳过条目、timeline 跳过会话、workspaces 跳过工作区、touched 跳过资源。',
+    description: '跳过前多少条，用于翻页；search / session / timeline / workspaces / touched 都支持。',
   },
   force: {
     type: 'boolean',
-    description: 'index 可选：全量重建，不跳过源文件自上次索引后没有变化的会话。',
+    description: 'index 可选：全量重建，不跳过没变的会话。',
   },
 } as const
 
