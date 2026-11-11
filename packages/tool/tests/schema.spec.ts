@@ -16,7 +16,7 @@ import {
 import type { SessiongraphToolArgs } from '../src/schema.ts'
 
 describe('SESSIONGRAPH_TOOL_OPERATIONS', () => {
-  it('is the seam vocabulary plus the index write', () => {
+  it('is the seam vocabulary plus the touched query and the index write', () => {
     expect(SESSIONGRAPH_TOOL_OPERATIONS).toEqual([
       'search',
       'session',
@@ -25,6 +25,7 @@ describe('SESSIONGRAPH_TOOL_OPERATIONS', () => {
       'timeline',
       'workspaces',
       'status',
+      'touched',
       'index',
     ])
   })
@@ -42,7 +43,17 @@ describe('SESSIONGRAPH_PARAMETERS', () => {
     expect(validateArgs(SESSIONGRAPH_PARAMETERS, { operation: 'timeline', limit: 5 })).toEqual([])
     expect(validateArgs(SESSIONGRAPH_PARAMETERS, { operation: 'workspaces' })).toEqual([])
     expect(validateArgs(SESSIONGRAPH_PARAMETERS, { operation: 'status' })).toEqual([])
+    expect(validateArgs(SESSIONGRAPH_PARAMETERS, { operation: 'touched', session_id: 'abc' })).toEqual([])
     expect(validateArgs(SESSIONGRAPH_PARAMETERS, { operation: 'index', force: true })).toEqual([])
+  })
+
+  it('accepts a touched call with a page size and an offset', () => {
+    expect(validateArgs(SESSIONGRAPH_PARAMETERS, {
+      operation: 'touched',
+      session_id: 'abc',
+      limit: 5,
+      offset: 2,
+    })).toEqual([])
   })
 
   it('accepts the event window and the single-session search filter', () => {

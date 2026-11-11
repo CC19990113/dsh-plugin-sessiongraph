@@ -41,6 +41,7 @@ import type {
   SessiongraphSessionSummary,
   SessiongraphStatusResult,
   SessiongraphTimelineResult,
+  SessiongraphTouchedResult,
   SessiongraphTraceNode,
   SessiongraphTraceResult,
   SessiongraphWorkspacesResult,
@@ -179,6 +180,15 @@ export const DEFAULT_BACKGROUND_INDEX_THRESHOLD = SESSIONS_BACKGROUND_INDEX_THRE
  * otherwise land on an index that predates the conversation.
  */
 export const DEFAULT_FRESHNESS_THRESHOLD_MS = 300_000
+
+/**
+ * Sessions the pre-step navigation block names.
+ *
+ * Kept equal to the number `history-hint.ts` renders: a search for more would pay the index for hits
+ * the reminder immediately drops, and a search for fewer would leave a line's worth of context
+ * unspent.
+ */
+const HISTORY_NAVIGATION_LIMIT = 3
 
 /** The stable system-prompt guidance positioning the session index against grepping session files. */
 export const SESSIONGRAPH_PROMPT_TEXT =
@@ -379,7 +389,26 @@ export function apply(ctx: Context, config: Config): void {
   // user's input and the next model request, which is exactly where "this looks like a question about
   // the past, and no summary is allowed to be the evidence" belongs. Registered here for the same
   // lifetime reason as the notice above.
-  if (resolved.historyHint) registerHistoryHint(ctx, historyHintState)
+  // The reminder earns its place only when it can name what it is pointing at. A bare "go search
+  // the index" costs permanent tokens and changes nothing; three dated session ids let the model
+  // jump straight to the evidence without a tool call. One index read per conversation is affordable
+  // — a search on a real 800-session corpus answers in single-digit milliseconds — and the hook
+  // itself caps the wait, so a slow or corrupt index degrades to the plain reminder instead of
+  // holding up the step.
+  if (resolved.historyHint) {
+    registerHistoryHint(ctx, historyHintState, async (query, signal) => {
+      const answer = await ctx.sessiongraph.query({
+        operation: 'search',
+        indexRoot,
+        query,
+        // The block the reminder renders holds at most this many lines; asking for more would pay
+        // for hits it then drops.
+        limit: HISTORY_NAVIGATION_LIMIT,
+        dedupeBySession: true,
+      }, signal)
+      return answer.hits
+    })
+  }
 }
 
 /**
@@ -633,6 +662,14 @@ export function buildRequest(
         indexRoot,
         ...(args.source === undefined ? {} : { source: args.source }),
         limit: bounded(args.limit, SESSIONGRAPH_DEFAULT_LIMITS.workspaces, maxLimit),
+        ...(offset === undefined ? {} : { offset }),
+      }
+    case 'touched':
+      return {
+        operation: 'touched',
+        indexRoot,
+        sessionId: required(args, 'session_id', 'touched'),
+        limit: bounded(args.limit, SESSIONGRAPH_DEFAULT_LIMITS.touched, maxLimit),
         ...(offset === undefined ? {} : { offset }),
       }
     case 'status':
@@ -1040,6 +1077,37 @@ function projectResult(result: SessiongraphResult, stale: boolean): Sessiongraph
     case 'timeline': return projectTimeline(result, stale)
     case 'workspaces': return projectWorkspaces(result, stale)
     case 'status': return projectStatus(result)
+    case 'touched': return projectTouched(result, stale)
+  }
+}
+
+/**
+ * Project a touched answer into the model-facing value.
+ *
+ * The seam spells its fields camelCase and the tool schema spells them snake_case, so this is the
+ * one place that mapping happens — same division of labour as every other projection here.
+ * @param result - the seam's answer.
+ * @param stale - whether the answer may be behind the conversation.
+ * @returns the canonical `touched` value.
+ */
+function projectTouched(result: SessiongraphTouchedResult, stale: boolean): SessiongraphValueFor<'touched'> {
+  return {
+    operation: 'touched',
+    session_id: result.sessionId,
+    resources: result.resources.map(resource => ({
+      path: resource.path,
+      kind: resource.kind,
+      mentions: resource.mentions,
+      first_seq: resource.firstSeq,
+      last_seq: resource.lastSeq,
+      first_at: resource.firstAt,
+      last_at: resource.lastAt,
+      tools: [...resource.tools],
+    })),
+    total: result.total,
+    truncated: result.truncated,
+    unparsed: result.unparsed,
+    ...staleField(stale),
   }
 }
 

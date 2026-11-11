@@ -22,8 +22,14 @@ import type { SessiongraphOperation } from 'dsh-plugin-sessiongraph-service'
 
 export { SESSIONGRAPH_ENTRY_KINDS, SESSIONGRAPH_OPERATIONS, SESSIONGRAPH_SOURCES }
 
-/** Every operation the one model-facing tool exposes: the seam's queries plus the write. */
-export const SESSIONGRAPH_TOOL_OPERATIONS = [...SESSIONGRAPH_OPERATIONS, 'index'] as const
+/**
+ * Every operation the one model-facing tool exposes: the seam's queries plus the write.
+ *
+ * `touched` sits in the query group even though the seam's own `SESSIONGRAPH_OPERATIONS` constant does
+ * not list it yet — the operation is dispatched to the store like every other query, and appending it
+ * here is what keeps `index` (the write) last.
+ */
+export const SESSIONGRAPH_TOOL_OPERATIONS = [...SESSIONGRAPH_OPERATIONS, 'touched', 'index'] as const
 
 /** One operation across the tool. */
 export type SessiongraphToolOperation = (typeof SESSIONGRAPH_TOOL_OPERATIONS)[number]
@@ -43,6 +49,7 @@ export const SESSIONGRAPH_DEFAULT_LIMITS = {
   session: 200,
   timeline: 20,
   workspaces: 50,
+  touched: 50,
 } as const
 
 /** One session's metadata, as the timeline, session, event and trace operations report it. */
@@ -119,6 +126,22 @@ const FAILED_SESSION = {
   properties: {
     path: { type: 'string', required: true },
     reason: { type: 'string', required: true },
+  },
+} as const
+
+/** One filesystem resource a session's tool calls referenced. */
+const TOUCHED_RESOURCE = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    path: { type: 'string', required: true },
+    kind: { type: 'string', required: true, enum: ['file', 'dir'] },
+    mentions: { type: 'integer', required: true },
+    first_seq: { type: 'integer', required: true },
+    last_seq: { type: 'integer', required: true },
+    first_at: { type: 'integer', required: true },
+    last_at: { type: 'integer', required: true },
+    tools: { type: 'array', required: true, items: { type: 'string' } },
   },
 } as const
 
@@ -274,6 +297,17 @@ export const SESSIONGRAPH_OUTPUT_SCHEMA = {
       indexed_at: { type: 'integer' },
       bytes: { type: 'integer', required: true },
     }),
+    // The resources one session's tool calls named, most-referenced first. `unparsed` is required
+    // rather than optional: "two files" and "two files out of forty unreadable calls" are different
+    // answers, and the renderer can only tell the reader which one it has if the count is always
+    // present.
+    member('touched', {
+      session_id: { type: 'string', required: true },
+      resources: { type: 'array', required: true, items: TOUCHED_RESOURCE },
+      ...COUNTS,
+      unparsed: { type: 'integer', required: true },
+      ...STALE,
+    }),
     // An index run on a store large enough to outlive the call is handed to the host's background
     // job registry, and the call answers before it has a report to give. `index` is therefore two
     // members rather than one object with optional counts: the started member carries only what the
@@ -319,7 +353,8 @@ export const SESSIONGRAPH_PARAMETERS = {
       '省略即 search（默认）：只传 query 就是一次跨会话检索。'
       + 'search（跨会话全文检索）、session（按 id 或唯一前缀读一个会话）、event（读某一条原始事件，含前后窗口）、'
       + 'trace（追踪会话血缘，或某条事件的替换/引用关系）、timeline（按时间列会话，新→旧）、'
-      + 'workspaces（工作区清单与统计）、status（索引自身状态）、index（建或刷新索引）。'
+      + 'workspaces（工作区清单与统计）、touched（一个会话读写过哪些文件/目录，读/编辑/写/read_image/grep/glob 的调用）、'
+      + 'status（索引自身状态）、index（建或刷新索引）。'
       + 'status 是唯一在还没有索引时也能回答的操作；索引不存在时其它操作会失败，先跑 index。',
   },
   query: {
@@ -329,8 +364,8 @@ export const SESSIONGRAPH_PARAMETERS = {
   session_id: {
     type: 'string',
     description:
-      'session / event / trace 必填，search 可选：完整会话 id，或长到只指向一个会话的前缀。'
-      + 'search 带上它就在这一个会话里检索；session 打开该会话。',
+      'session / event / trace / touched 必填，search 可选：完整会话 id，或长到只指向一个会话的前缀。'
+      + 'search 带上它就在这一个会话里检索；session 打开该会话；touched 列出该会话读写过的文件。',
   },
   seq: {
     type: 'number',
@@ -384,13 +419,14 @@ export const SESSIONGRAPH_PARAMETERS = {
   limit: {
     type: 'number',
     description:
-      '最多返回多少条；超出配置上限会被截断。省略按操作给默认值：search 10、timeline 20、workspaces 50、session 200 条 entries。',
+      '最多返回多少条；超出配置上限会被截断。省略按操作给默认值：search 10、timeline 20、workspaces 50、session 200 条 entries、'
+      + 'touched 50 个资源。',
   },
   offset: {
     type: 'number',
     description:
-      '跳过前多少条，用于翻页。search、session、timeline、workspaces 四个操作都支持：search 跳过命中、'
-      + 'session 跳过条目、timeline 跳过会话、workspaces 跳过工作区。',
+      '跳过前多少条，用于翻页。search、session、timeline、workspaces、touched 五个操作都支持：search 跳过命中、'
+      + 'session 跳过条目、timeline 跳过会话、workspaces 跳过工作区、touched 跳过资源。',
   },
   force: {
     type: 'boolean',

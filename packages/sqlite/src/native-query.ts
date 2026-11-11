@@ -75,6 +75,11 @@ export async function queryNatively(
   maxSnippetChars: number,
 ): Promise<SessiongraphResult | undefined> {
   if (engine === 'typescript') return undefined
+  // `touched` has only a TypeScript implementation: it parses every `tool` entry of one session and
+  // the kernel has no answer for it yet. Handing it to the TypeScript path is not a degradation —
+  // it is the only implementation — so this must not print "native unavailable", which would report
+  // a missing build where there is nothing to build.
+  if (request.operation === 'touched') return undefined
   const kernel = queryKernel()
   if (kernel === undefined) {
     // `auto` treats "no kernel" as the normal case on a machine without a build; asking for `native`
@@ -193,6 +198,10 @@ function nativeRequest(
       }
     case 'workspaces':
       return { ...base, limit: request.limit, offset: request.offset ?? 0 }
+    case 'touched':
+      // Unreachable: `queryNatively` returns before this point for `touched`. The case exists so the
+      // switch stays exhaustive over the seam's operation union, where a missing arm is a type error.
+      return base
     case 'status':
       // `status` is answered from the file itself, before any engine is consulted.
       return base

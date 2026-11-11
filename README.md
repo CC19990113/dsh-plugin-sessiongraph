@@ -11,9 +11,9 @@ Six packages behind one strict seam: **adding a store or an indexer never touche
 | Package | Role |
 |---|---|
 | `service` | Defines the `ctx.sessiongraph` seam: query vocabulary, store/indexer registries, schema v1, the Chinese bigram tokenizer |
-| `sqlite` | Read provider: answers the seven queries from `index.db`, routing between the native and TypeScript engines |
+| `sqlite` | Read provider: answers the eight queries from `index.db`, routing between the native and TypeScript engines |
 | `sessions` | Write provider: scan both harnesses' session logs (DSH and Codex), decode, extract entries, write the database; `raw.ts` reads unabridged events back |
-| `tool` | Consumer: **one** `sessiongraph` tool (eight operations), the `/sessiongraph` command, the system-prompt section, the settings HTTP route, and tool visibility |
+| `tool` | Consumer: **one** `sessiongraph` tool (nine operations), the `/sessiongraph` command, the system-prompt section, the settings HTTP route, and tool visibility |
 | `native` | Rust kernel: index writes (`indexSessions`) and queries (`query`); returns `undefined` on any failure, never throws |
 | `panel` | Browser half only: the settings "会话检索" tab (`dsh.client`; the host entry is an empty apply) |
 | `bundle` | Installable meta-package: `cordis.patch.yml` |
@@ -73,7 +73,7 @@ Memory does not overlap with either: a conversation may **never enter memory** (
 
 `sessiongraph`:
 
-**One tool, eight operations.** Since 0.2.0 indexing is no longer a separate tool (`sessiongraph_index` is gone). `operation` is **optional and defaults to `search`**: a call that names only `query` is a cross-session search, so the model does not have to restate the common case.
+**One tool, nine operations.** Since 0.2.0 indexing is no longer a separate tool (`sessiongraph_index` is gone). `operation` is **optional and defaults to `search`**: a call that names only `query` is a cross-session search, so the model does not have to restate the common case.
 
 | Operation | What it does |
 |---|---|
@@ -84,6 +84,7 @@ Memory does not overlap with either: a conversation may **never enter memory** (
 | `timeline` | List sessions newest-first, optionally scoped to a workspace |
 | `workspaces` | Workspace inventory with session/entry counts |
 | `status` | The index's own state — **the only operation that answers before an index exists** |
+| `touched` | Which files one session touched: reads `file_path` from `read`/`edit`/`write`/`read_image` and `path` from `grep`/`glob` out of that session's `tool` entries, merges by path, and reports mentions, first/last time and the tool names involved. Calls whose arguments the index clipped are counted in `unparsed` rather than guessed at, and `bash` free text is never counted |
 | `index` | Build or refresh inside the shared 30-second tool budget; unchanged sources are skipped, and past a thousand sessions the run becomes a host background job returning a job id |
 
 Tool parameters are **snake_case** (`session_id`, `window_before`, `dedupe_by_session`), matching the built-in tools.
@@ -154,9 +155,17 @@ Prefer to drive it yourself? `autoBuild: false` disables the first automatic bui
 
 **It says so once, after a tool runs.** A plugin cannot upgrade itself — it lives in a profile's dependency tree, and rewriting that tree is the host's job. So it does the next best thing: after one of its tools runs, it checks the registry in the background and, when the published version is newer than the running one, appends a notice to the next step of the conversation, where both the model and the user can see it. Three details keep it from turning into noise: the check only ever happens *after* a tool was used; a release is announced once, with `notifiedVersion` persisted so a desktop restart does not replay it; and checks run at most every six hours, while an unreachable registry, a timeout, or an unwritable state file all mean "nothing to report" rather than an error. The registry follows npm's own resolution order — `npm_config_registry`, then `registry=` in the user's `~/.npmrc`, then npm's public default — so a machine behind a mirror checks the mirror it actually installs from. `updateCheck: false` turns the whole thing off, and `updateCheckIntervalMs` changes the interval.
 
-### A nudge for history questions
+### A guided shortcut for history questions
 
-The system prompt already says to search the index instead of grepping compressed logs. This release adds the moment-of-use reminder: when the last message the user typed reads like a question about past conversations (`上次`, `之前`, `昨天`, `last time`, …) and this conversation has not used either tool yet, the plugin appends one short notice to that model request pointing at `sessiongraph`. Three rules keep it quiet: only a message whose source is the user's own typing can trigger it (injected context, tool results and other plugins' notices are ignored, so the reminder cannot trigger itself); it speaks at most once per conversation; and it never speaks after `sessiongraph` or `sessiongraph` (operation `index`) has run. `historyHint: false` turns it off.
+The system prompt already says to search the index instead of grepping compressed logs, but that is not enough: one sentence telling the model to go look costs tokens and hands it nothing to look at. So when the last message the user typed reads like a question about past conversations (`上次`, `之前`, `昨天`, `last time`, …), the plugin **runs the search first** and inlines the answer — one index read (milliseconds against a real eight-hundred-session corpus) that names up to three dated sessions:
+
+```
+[会话历史] 过去相关（调 sessiongraph 按 id 查原文）：
+· 11-10 dsh-plugin-codegraph 发布流程修复 · 8cb0f724
+· 11-09 sessiongraph Codex 解析 · b2175d5
+```
+
+With an id in hand the model can open `session <id>` directly instead of paying for a search round trip. Three rules keep it quiet: only a message whose source is the user's own typing can trigger it (injected context, tool results and other plugins' notices are ignored, so the reminder cannot trigger itself); it speaks at most once per conversation; and it never speaks after `sessiongraph` has run. The lookup is capped at 300 ms, and a missing, corrupt or slow index degrades silently to the old static sentence — this step can never delay or veto a model request. Questions about preferences (`偏好`, `喜欢`, `习惯`, …) do not trigger it: those belong to the memory layer, not the index. `historyHint: false` turns it off.
 
 ### What gets indexed
 

@@ -1,20 +1,25 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
+import type { SessiongraphHit } from 'dsh-plugin-sessiongraph-service'
+import { SessiongraphSessionId } from 'dsh-plugin-sessiongraph-service'
 import type { HistoryHintMessage } from '../src/history-hint.ts'
 import {
   buildHistoryHint,
   createHistoryHintState,
   HISTORY_HINT_SOURCE_KIND,
+  HISTORY_HINT_TEXT,
   HISTORY_QUESTION_TERMS,
+  MEMORY_QUESTION_TERMS,
   lastUserText,
   looksLikeHistoryQuestion,
   noteHistoryToolUse,
   registerHistoryHint,
 } from '../src/history-hint.ts'
+import type { HistoryHintSearch } from '../src/history-hint.ts'
 
 /** One `agent/pre-step` listener, as the host would hold it on an agent's scope. */
 type PreStepListener = (
-  payload: { agent?: { id?: unknown }; messages?: readonly unknown[] },
+  payload: { agent?: { id?: unknown }; messages?: readonly unknown[]; signal?: AbortSignal | undefined },
   next: () => Promise<{ kind: string; messages: readonly unknown[] }>,
 ) => Promise<{ kind: string; messages: readonly unknown[] }>
 
@@ -65,14 +70,42 @@ function injectedMessage(text: string): unknown {
   return { role: 'user', source: { kind: 'recall' }, content: [{ type: 'text', text }] }
 }
 
+/** One indexed hit, shaped exactly as the store reports it; only the named fields vary per test. */
+function hit(overrides: {
+  sessionId: string
+  time: number
+  workspace: string
+  title?: string | undefined
+}): SessiongraphHit {
+  return {
+    sessionId: SessiongraphSessionId(overrides.sessionId),
+    source: 'dsh',
+    title: overrides.title,
+    workspace: overrides.workspace,
+    time: overrides.time,
+    kind: 'user',
+    seq: 1,
+    turn: undefined,
+    snippet: '命中片段',
+    length: 12,
+  }
+}
+
+/** The text this module appended as the last message, or undefined when it appended nothing. */
+function appendedText(decision: { messages: readonly unknown[] }): string | undefined {
+  const last = decision.messages.at(-1) as HistoryHintMessage | undefined
+  if (last === undefined || last.source.kind !== HISTORY_HINT_SOURCE_KIND) return undefined
+  return last.content[0]?.text
+}
+
 /** Register the hook for one agent and hand back the listener it installed on that agent. */
-function mountOneAgent(): {
+function mountOneAgent(options: { search?: HistoryHintSearch } = {}): {
   listener: PreStepListener
   state: ReturnType<typeof createHistoryHintState>
 } {
   const { ctx, created } = fakeContext()
   const state = createHistoryHintState()
-  registerHistoryHint(ctx, state)
+  registerHistoryHint(ctx, state, options.search)
   const { scope, listeners } = fakeAgentScope()
   // The listener lands on the agent's own scope, which only exists once `agent/created` fired.
   for (const listener of created) listener({ agent: { id: 'agent-1', ctx: scope } })
@@ -83,8 +116,12 @@ function mountOneAgent(): {
 async function enter(
   listener: PreStepListener,
   messages: readonly unknown[],
+  signal?: AbortSignal,
 ): Promise<{ kind: string; messages: readonly unknown[] }> {
-  return listener({ agent: { id: 'agent-1' }, messages }, async () => ({ kind: 'enter', messages }))
+  return listener(
+    { agent: { id: 'agent-1' }, messages, signal },
+    async () => ({ kind: 'enter', messages }),
+  )
 }
 
 describe('looksLikeHistoryQuestion', () => {
@@ -106,6 +143,23 @@ describe('looksLikeHistoryQuestion', () => {
   it('leaves ordinary work requests alone', () => {
     expect(looksLikeHistoryQuestion('把这个按钮颜色改成蓝色')).toBe(false)
     expect(looksLikeHistoryQuestion('跑一下测试')).toBe(false)
+  })
+
+  it('leaves memory questions to the memory layer', () => {
+    // Every one of these also matches a history word (`记得`, `之前`, `说过`), and the exclusion is
+    // what keeps an index pointer from competing with the memory layer's own answer.
+    expect(looksLikeHistoryQuestion('你记得我喜欢什么')).toBe(false)
+    expect(looksLikeHistoryQuestion('我平时写代码的习惯是什么')).toBe(false)
+    expect(looksLikeHistoryQuestion('我之前说过我偏好哪种写法吗')).toBe(false)
+    expect(looksLikeHistoryQuestion('记住这个约定')).toBe(false)
+  })
+
+  it('keeps the trigger vocabulary even though it can misfire', () => {
+    // A deleted trigger word turns a false positive into a permanent miss, and the miss is the more
+    // expensive failure; the memory terms are an exclusion list, never a replacement for this one.
+    expect(HISTORY_QUESTION_TERMS).toContain('进度')
+    expect(HISTORY_QUESTION_TERMS).toContain('记得')
+    expect(MEMORY_QUESTION_TERMS).toEqual(['偏好', '喜欢', '习惯', '平时', '一般', '风格', '记住'])
   })
 })
 
@@ -135,6 +189,68 @@ describe('buildHistoryHint', () => {
     expect(hint.source.kind).toBe(HISTORY_HINT_SOURCE_KIND)
     expect(hint.source.form).toBe('notice')
     expect(hint.content[0]?.text).toContain('sessiongraph')
+  })
+
+  it('keeps the static sentence when there is nothing to point at', () => {
+    expect(buildHistoryHint().content[0]?.text).toBe(HISTORY_HINT_TEXT)
+    expect(buildHistoryHint([]).content[0]?.text).toBe(HISTORY_HINT_TEXT)
+  })
+
+  it('renders one navigation line per hit, with the day, workspace, title and id prefix', () => {
+    const hint = buildHistoryHint([
+      hit({
+        sessionId: '8cb0f724-1111-2222-3333-444444444444',
+        time: new Date(2026, 10, 10, 12).getTime(),
+        workspace: '/Users/admin/www/dsh-plugin-codegraph',
+        title: '发布流程修复',
+      }),
+      hit({
+        sessionId: 'b2175d5e-aaaa-bbbb-cccc-dddddddddddd',
+        time: new Date(2026, 10, 9, 12).getTime(),
+        workspace: '/Users/admin/www/sessiongraph',
+        title: 'Codex 解析',
+      }),
+    ])
+
+    expect(hint.content[0]?.text.split('\n')).toEqual([
+      '[会话历史] 过去相关（调 sessiongraph 按 id 查原文）：',
+      '· 11-10 dsh-plugin-codegraph 发布流程修复 · 8cb0f724',
+      '· 11-09 sessiongraph Codex 解析 · b2175d5e',
+    ])
+  })
+
+  it('names at most three sessions however many hits it is given', () => {
+    const hits = ['a1', 'b2', 'c3', 'd4', 'e5'].map((prefix, index) => hit({
+      sessionId: `${prefix}0000000-1111-2222-3333-444444444444`,
+      time: new Date(2026, 10, 1 + index, 12).getTime(),
+      workspace: `/work/project-${prefix}`,
+      title: `会话 ${prefix}`,
+    }))
+
+    const text = buildHistoryHint(hits).content[0]?.text ?? ''
+    const lines = text.split('\n')
+
+    expect(lines).toHaveLength(1 + 3)
+    expect(text).toContain('a1000000')
+    expect(text).toContain('c3000000')
+    expect(text).not.toContain('d4000000')
+    expect(text).not.toContain('e5000000')
+  })
+
+  it('names no provider and no URI scheme in the navigation block', () => {
+    const text = buildHistoryHint([
+      hit({
+        sessionId: '8cb0f724-1111-2222-3333-444444444444',
+        time: new Date(2026, 10, 10, 12).getTime(),
+        workspace: '/Users/admin/www/dsh-plugin-codegraph',
+        title: '发布流程修复',
+      }),
+    ]).content[0]?.text ?? ''
+
+    // The block rides in the conversation; a provider name or an address scheme would be a pointer
+    // into one deployment's storage rather than into this index.
+    expect(text).not.toMatch(/viking:|openviking|claude|anthropic/i)
+    expect(text).not.toMatch(/[a-z][a-z0-9+.-]*:\/\//i)
   })
 })
 
@@ -229,6 +345,180 @@ describe('the pre-step hook', () => {
 
     expect(decisionA.messages).toHaveLength(1)
     expect(decisionB.messages).toHaveLength(2)
+  })
+
+  it('stays the static sentence when no search is wired in', async () => {
+    // Backward compatibility: a deployment that has not provided the index query keeps exactly the
+    // behaviour the reminder had before the navigation block existed.
+    const { listener } = mountOneAgent()
+
+    const decision = await enter(listener, [userMessage('上次那个 bug 怎么修的')])
+
+    expect(decision.kind).toBe('enter')
+    expect(decision.messages).toHaveLength(2)
+    expect(appendedText(decision)).toBe(HISTORY_HINT_TEXT)
+  })
+
+  it('injects a navigation block naming up to three sessions by id prefix', async () => {
+    const { listener } = mountOneAgent({
+      search: async () => [
+        hit({
+          sessionId: '8cb0f724-1111-2222-3333-444444444444',
+          time: new Date(2026, 10, 10, 12).getTime(),
+          workspace: '/Users/admin/www/dsh-plugin-codegraph',
+          title: '发布流程修复',
+        }),
+        hit({
+          sessionId: 'b2175d5e-aaaa-bbbb-cccc-dddddddddddd',
+          time: new Date(2026, 10, 9, 12).getTime(),
+          workspace: '/Users/admin/www/sessiongraph',
+          title: 'Codex 解析',
+        }),
+        hit({
+          sessionId: 'c3c3c3c3-9999-8888-7777-666666666666',
+          time: new Date(2026, 10, 8, 12).getTime(),
+          workspace: '/Users/admin/www/other',
+          title: undefined,
+        }),
+      ],
+    })
+
+    const decision = await enter(listener, [userMessage('上次那个 SLS 凭据放哪了')])
+    const appended = decision.messages.at(-1) as HistoryHintMessage
+    const text = appended.content[0]?.text ?? ''
+    const lines = text.split('\n')
+
+    expect(appended.source.kind).toBe(HISTORY_HINT_SOURCE_KIND)
+    expect(appended.source.form).toBe('notice')
+    // One header plus one line per hit, and every line starts with the `· ` marker.
+    expect(lines).toHaveLength(4)
+    expect(lines[0]).toBe('[会话历史] 过去相关（调 sessiongraph 按 id 查原文）：')
+    expect(lines.slice(1).every(line => line.startsWith('· '))).toBe(true)
+    expect(text).toMatch(/· \d{2}-\d{2} /)
+    expect(text).toContain('· 11-10 dsh-plugin-codegraph 发布流程修复 · 8cb0f724')
+    expect(text).toContain('· 11-09 sessiongraph Codex 解析 · b2175d5e')
+    expect(text).toContain('· 11-08 other (无标题) · c3c3c3c3')
+  })
+
+  it('stays out of a memory question, without even asking the index', async () => {
+    const search = vi.fn(async () => [
+      hit({
+        sessionId: '8cb0f724-1111-2222-3333-444444444444',
+        time: new Date(2026, 10, 10, 12).getTime(),
+        workspace: '/Users/admin/www/dsh-plugin-codegraph',
+        title: '发布流程修复',
+      }),
+    ])
+    const { listener } = mountOneAgent({ search })
+
+    const decision = await enter(listener, [userMessage('你记得我喜欢什么')])
+
+    expect(decision.messages).toHaveLength(1)
+    expect(search).not.toHaveBeenCalled()
+  })
+
+  it('asks the index at most once per conversation', async () => {
+    const search = vi.fn(async () => [] as readonly SessiongraphHit[])
+    const { listener } = mountOneAgent({ search })
+
+    await enter(listener, [userMessage('上次那个 bug 怎么修的')])
+    await enter(listener, [userMessage('昨天说的那个方案呢')])
+
+    expect(search).toHaveBeenCalledTimes(1)
+  })
+
+  it('passes a signal that aborts with the step', async () => {
+    const controller = new AbortController()
+    let received: AbortSignal | undefined
+    const { listener } = mountOneAgent({
+      search: async (_query, signal) => {
+        received = signal
+        return []
+      },
+    })
+
+    const decision = await enter(listener, [userMessage('上次那个 bug 怎么修的')], controller.signal)
+
+    expect(received).toBeInstanceOf(AbortSignal)
+    expect(received?.aborted).toBe(false)
+    controller.abort()
+    expect(received?.aborted).toBe(true)
+    // An empty result is not a failure: the static sentence is still delivered and the step admitted.
+    expect(decision.kind).toBe('enter')
+    expect(appendedText(decision)).toBe(HISTORY_HINT_TEXT)
+  })
+
+  it('falls back to the static sentence when the search throws, without rejecting the step', async () => {
+    // This is the first failing search in the file, so it also observes the one-time report.
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { listener } = mountOneAgent({
+        search: async () => {
+          throw new Error('index unavailable')
+        },
+      })
+
+      const decision = await enter(listener, [userMessage('上次那个 bug 怎么修的')])
+
+      expect(decision.kind).toBe('enter')
+      expect(decision.messages).toHaveLength(2)
+      expect(appendedText(decision)).toBe(HISTORY_HINT_TEXT)
+      expect(errors).toHaveBeenCalled()
+    } finally {
+      errors.mockRestore()
+    }
+  })
+
+  it('treats a malformed search result as no hits', async () => {
+    const { listener } = mountOneAgent({
+      search: async () => 'not an array' as unknown as readonly SessiongraphHit[],
+    })
+
+    const decision = await enter(listener, [userMessage('上次那个 bug 怎么修的')])
+
+    expect(decision.kind).toBe('enter')
+    expect(appendedText(decision)).toBe(HISTORY_HINT_TEXT)
+  })
+
+  it('gives up after 300 ms and never retries that conversation', async () => {
+    vi.useFakeTimers()
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      let receivedSignal: AbortSignal | undefined
+      const search = vi.fn((_query: string, signal?: AbortSignal) => {
+        receivedSignal = signal
+        return new Promise<readonly SessiongraphHit[]>(() => {})
+      })
+      const { listener } = mountOneAgent({ search })
+
+      const pending = enter(listener, [userMessage('看下鸿蒙的进度到哪了')])
+      // Let `next()` resolve and the deadline timer arm before advancing the clock.
+      await vi.advanceTimersByTimeAsync(0)
+      expect(search).toHaveBeenCalledTimes(1)
+
+      let settled = false
+      void pending.then(() => { settled = true })
+      await vi.advanceTimersByTimeAsync(299)
+      // One millisecond short of the budget, the listener is still waiting on the search.
+      expect(settled).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(1)
+      const decision = await pending
+
+      expect(receivedSignal).toBeInstanceOf(AbortSignal)
+      expect(decision.kind).toBe('enter')
+      expect(decision.messages).toHaveLength(2)
+      expect(appendedText(decision)).toBe(HISTORY_HINT_TEXT)
+
+      // The reminder was claimed before the search, so a timed-out query costs the conversation one
+      // notice, not one retry per step.
+      const second = await enter(listener, [userMessage('昨天说的那个方案呢')])
+      expect(second.messages).toHaveLength(1)
+      expect(search).toHaveBeenCalledTimes(1)
+    } finally {
+      errors.mockRestore()
+      vi.useRealTimers()
+    }
   })
 
   it('covers the vocabulary the reminder is built on', () => {

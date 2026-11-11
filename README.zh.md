@@ -11,9 +11,9 @@
 | 包 | 角色 |
 |---|---|
 | `service` | 定义 `ctx.sessiongraph` 缝隙：查询词汇、store/indexer 注册表、schema v1、中文 bigram 分词器 |
-| `sqlite` | 读 provider：从 `index.db` 回答七个查询，并在 native / TypeScript 两套引擎间路由 |
+| `sqlite` | 读 provider：从 `index.db` 回答八个查询，并在 native / TypeScript 两套引擎间路由 |
 | `sessions` | 写 provider：扫描两个 harness（DSH 与 Codex）的会话日志 → 解压 → 抽取条目 → 写库；另有 `raw.ts` 回读未删节事件 |
-| `tool` | 消费者：**一个** `sessiongraph` 工具（八个 operation）+ `/sessiongraph` 命令 + 系统提示段 + 设置页 HTTP 路由 + 工具可见性 |
+| `tool` | 消费者：**一个** `sessiongraph` 工具（九个 operation）+ `/sessiongraph` 命令 + 系统提示段 + 设置页 HTTP 路由 + 工具可见性 |
 | `native` | Rust 内核：索引写入（`indexSessions`）与查询（`query`），加载失败返回 `undefined`，绝不抛 |
 | `panel` | 纯浏览器半侧：设置页「会话检索」页签（`dsh.client`，宿主入口是空 apply） |
 | `bundle` | 安装元包：`cordis.patch.yml` |
@@ -73,7 +73,7 @@
 
 `sessiongraph`：
 
-**一个工具，八个 operation。** 从 0.2.0 起，索引不再是独立工具（`sessiongraph_index` 已删除）。`operation` **可省略，缺省即 `search`**：只传 `query` 就是一次跨会话检索，常见情况不用模型再重复声明一遍。
+**一个工具，九个 operation。** 从 0.2.0 起，索引不再是独立工具（`sessiongraph_index` 已删除）。`operation` **可省略，缺省即 `search`**：只传 `query` 就是一次跨会话检索，常见情况不用模型再重复声明一遍。
 
 | operation | 作用 |
 |---|---|
@@ -84,6 +84,7 @@
 | `timeline` | 按时间列会话（可过滤工作区与 `source`），新→旧 |
 | `workspaces` | 工作区清单与统计，可按 `source` 只看一个 harness |
 | `status` | 索引自身状态；**唯一在无索引时也能回答的操作** |
+| `touched` | 某个会话碰过哪些文件：从该会话的 `tool` 条目读 `read`/`edit`/`write`/`read_image` 的 `file_path` 与 `grep`/`glob` 的 `path`，同路径合并后给出次数、首尾时间与涉及的 tool 名。参数被索引截断的调用计入 `unparsed`（不猜），`bash` 的自由文本一律不算 |
 | `index` | 建或刷新索引，与查询共用 30s 工具预算；源文件 mtime+size 未变就跳过，会话攒到 1000+ 时转后台 job 并返回 jobId |
 
 参数一律 **snake_case**（`session_id` / `window_before` / `dedupe_by_session`），与宿主自带工具一致。
@@ -154,9 +155,17 @@
 
 **用完工具就说一声。** 插件没法自我升级——它装在 profile 的依赖树里，改那棵树是宿主的事。所以它做次优的那件事：某个工具被调用之后，后台查一次 registry，发现线上版本比正在运行的更新，就把一条通知追加进下一步的对话，模型和用户都看得见。三个细节让它不至于变成噪音：检查只在工具用过之后才发生，不会凭空提醒；同一条版本只提醒一次，`notifiedVersion` 落盘记着，重启桌面也不重播；查询间隔默认六小时，而查不到、超时、写盘失败都只是「没有可说的」，绝不影响工具本身。registry 按 npm 自己的顺序解析——`npm_config_registry` 环境变量优先，其次用户 `~/.npmrc` 里的 `registry=`，最后才是 npm 官方地址——所以配了镜像的机器查的就是那个镜像。`updateCheck: false` 关掉整个检查，`updateCheckIntervalMs` 调间隔。
 
-### 历史类问题会收到一次提示
+### 历史类问题会先收到一份导航
 
-系统提示已经说了「查本地历史用 sessiongraph」。这个版本补上真正会失效的那一刻：如果用户最后一条亲手输入的消息像是在问过去的事（`上次` / `之前` / `昨天` / `last time` 等），而本会话还没用过这两个工具，插件就在这次模型请求上追加一条很短的提示，指向 `sessiongraph`。三条规则控制噪音：只认 `source.kind === 'user'` 的真人输入（注入上下文、工具结果、别的插件的 notice 都不会触发，所以提示不会自我触发）；每个会话最多一次；工具用过后不再出现。`historyHint: false` 关闭。
+系统提示已经说了「查本地历史用 sessiongraph」，但那不够：一句「去查索引」既花 token，又没给出任何可以看的东西。所以当用户最后一条亲手输入的消息像是在问过去的事（`上次` / `之前` / `昨天` 等），插件**先把结果查好**再注入 —— 一次索引检索（真实八百会话库上单次毫秒级），带出最多三条带日期的会话指针：
+
+```
+[会话历史] 过去相关（调 sessiongraph 按 id 查原文）：
+· 11-10 dsh-plugin-codegraph 发布流程修复 · 8cb0f724
+· 11-09 sessiongraph Codex 解析 · b2175d5
+```
+
+模型拿到 id 就能直接 `session <id>` 打开原文，省掉「先搜再读」那一趟。三道保险让它不至于成为负担：只认 `source.kind === 'user'` 的真人输入（注入上下文、工具结果、别的插件的 notice 都不会触发，所以提示不会自我触发）；每个会话最多一次；工具用过后不再出现。检索本身有 300ms 硬超时，索引缺失、损坏、超时一律静默退回原来那句静态提醒 —— 这一步永远不会拖慢或阻断模型请求。记忆类问题（`偏好` / `喜欢` / `习惯` 等）不触发，那属于记忆层，不归索引管。`historyHint: false` 关闭。
 
 ### 索引什么
 

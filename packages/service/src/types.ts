@@ -424,6 +424,70 @@ export interface SessiongraphEventTraceResult {
 /** Either trace shape, discriminated on `kind`. */
 export type SessiongraphTraceResult = SessiongraphSessionTraceResult | SessiongraphEventTraceResult
 
+/**
+ * List the filesystem resources one session touched.
+ *
+ * Read out of the index's own `tool` entries rather than from a materialised edge table: a session
+ * holds around a hundred tool calls, so parsing its entries costs milliseconds and a new table would
+ * cost a schema version, a rebuild of every index on the machine, and a second implementation in the
+ * native kernel — for a relationship that can always be recomputed from `entry.text`.
+ *
+ * The extraction is deliberately narrow. Only tools whose arguments carry a structured path are
+ * read (`read`/`edit`/`write`/`read_image` `file_path`, `grep`/`glob` `path`); `bash` is 55% of all
+ * tool calls on a real corpus and its command line is free text, so pulling paths out of it would be
+ * guessing. A path that cannot be parsed is counted in `unparsed`, never fabricated.
+ */
+export interface SessiongraphTouchedRequest extends SessiongraphRequestBase {
+  operation: 'touched'
+  /** Full session id, or a prefix long enough to identify exactly one session. */
+  sessionId: string
+  /** Maximum resources to return, most-mentioned first. */
+  limit: number
+  /** Resources to skip, for paging. */
+  offset?: number
+}
+
+/** One filesystem resource a session's tool calls referenced. */
+export interface SessiongraphTouchedEntry {
+  /**
+   * Normalised path: absolute when the call gave one, otherwise resolved against the session's
+   * workspace. No symlinks are followed and the filesystem is never consulted — the file may be gone.
+   */
+  path: string
+  /** `dir` for a `grep`/`glob` target or a path ending in `/`; `file` otherwise. */
+  kind: 'file' | 'dir'
+  /** How many separate tool calls referenced this path. */
+  mentions: number
+  /** Sequence number of the first and last call that referenced it. */
+  firstSeq: number
+  lastSeq: number
+  /** Epoch milliseconds of the first and last call that referenced it. */
+  firstAt: number
+  lastAt: number
+  /** Tool names that referenced it, sorted; `['edit', 'read']` for a read-then-modified file. */
+  tools: string[]
+}
+
+/** Answer to a touched request. */
+export interface SessiongraphTouchedResult {
+  operation: 'touched'
+  /** The session the resources belong to, resolved from the prefix in the request. */
+  sessionId: SessiongraphSessionId
+  /** Resources, most-referenced first. */
+  resources: SessiongraphTouchedEntry[]
+  /** Number of distinct resources found, before `limit`/`offset`. */
+  total: number
+  /** True when `total` exceeded `limit + offset`. */
+  truncated: boolean
+  /**
+   * Tool entries whose arguments could not be read — clipped at the indexer's cap, or not JSON.
+   *
+   * Reported instead of silently dropped so a caller can tell "this session touched two files" from
+   * "this session touched two files out of forty calls this store could not parse".
+   */
+  unparsed: number
+}
+
 /** Every request the seam accepts, discriminated on `operation`. */
 export type SessiongraphRequest =
   | SessiongraphSearchRequest
@@ -433,6 +497,7 @@ export type SessiongraphRequest =
   | SessiongraphTimelineRequest
   | SessiongraphWorkspacesRequest
   | SessiongraphStatusRequest
+  | SessiongraphTouchedRequest
 
 /** The result type a given request produces. */
 export type SessiongraphResultFor<R extends SessiongraphRequest> = R extends SessiongraphSearchRequest
@@ -449,7 +514,9 @@ export type SessiongraphResultFor<R extends SessiongraphRequest> = R extends Ses
             ? SessiongraphWorkspacesResult
             : R extends SessiongraphStatusRequest
               ? SessiongraphStatusResult
-              : never
+              : R extends SessiongraphTouchedRequest
+                ? SessiongraphTouchedResult
+                : never
 
 /** Every result the seam produces. */
 export type SessiongraphResult =
@@ -460,6 +527,7 @@ export type SessiongraphResult =
   | SessiongraphTimelineResult
   | SessiongraphWorkspacesResult
   | SessiongraphStatusResult
+  | SessiongraphTouchedResult
 
 /**
  * A read provider: answers queries from an index it claims.

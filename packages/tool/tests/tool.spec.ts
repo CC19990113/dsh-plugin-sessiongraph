@@ -1,5 +1,5 @@
 /**
- * Tool-level wiring tests for the single `sessiongraph` tool: one registration, eight operations on
+ * Tool-level wiring tests for the single `sessiongraph` tool: one registration, nine operations on
  * one parameter schema, and the measured background split for `index`.
  *
  * The `ctx` here is a structural stand-in for the services the plugin injects and nothing more:
@@ -21,6 +21,7 @@ import type {
   SessiongraphSessionSummary,
   SessiongraphStatusResult,
   SessiongraphTimelineResult,
+  SessiongraphTouchedResult,
   SessiongraphTraceResult,
   SessiongraphWorkspacesResult,
 } from 'dsh-plugin-sessiongraph-service'
@@ -144,6 +145,14 @@ function answers(): Record<string, unknown> {
     workspaces: [{ workspace: session.workspace, sessions: 6, entries: 30, firstAt: 1, lastAt: 2 }],
     total: 1,
   }
+  const touched: SessiongraphTouchedResult = {
+    operation: 'touched',
+    sessionId: session.sessionId,
+    resources: [],
+    total: 0,
+    truncated: false,
+    unparsed: 0,
+  }
   return {
     search: { operation: 'search', hits: [], total: 0, truncated: false },
     session: sessionResult,
@@ -152,6 +161,7 @@ function answers(): Record<string, unknown> {
     timeline,
     workspaces,
     status,
+    touched,
   }
 }
 
@@ -290,6 +300,7 @@ describe('operation dispatch', () => {
       ['timeline', { operation: 'timeline' }],
       ['workspaces', { operation: 'workspaces' }],
       ['status', { operation: 'status' }],
+      ['touched', { operation: 'touched', session_id: '037ad8fc' }],
     ]
     for (const [, args] of calls) await tool.execute(args, exec())
     expect(harnessed.queries).toEqual(calls.map(([operation]) => operation))

@@ -406,6 +406,30 @@ function renderValue(
         + `${value.workspaces} 个工作区、${formatBytes(value.bytes)}。最近一次建索引 ${indexedAt}。`
         + `\n${formatLiveSessions(value.live_sessions)}`
     }
+    case 'touched': {
+      // A tool entry whose arguments the store could not read is reported, never hidden: a two-file
+      // answer drawn from forty unreadable calls would otherwise read as a two-file session.
+      const unreadable = value.unparsed === 0 ? [] : [`另有 ${value.unparsed} 条调用参数无法解析。`]
+      if (value.resources.length === 0) {
+        return [
+          '这个会话没有记录到读写文件的工具调用'
+            + '（只统计 read / edit / write / read_image 的 file_path 与 grep / glob 的 path；bash 的命令行不算）。',
+          ...unreadable,
+        ].join('\n')
+      }
+      const more = value.truncated
+        ? `（共 ${value.total} 个，显示 ${value.resources.length} 个；用 offset 翻页）`
+        : ''
+      const lines = [`会话 ${value.session_id} 触及 ${value.total} 个资源${more}，被提及最多的在前：`]
+      value.resources.forEach((resource, index) => {
+        const kind = resource.kind === 'dir' ? '目录' : '文件'
+        lines.push(
+          `${index + 1}. \`${resource.path}\` · ${kind} · ${resource.mentions} 次`
+            + ` · ${resource.tools.join(', ')}`,
+        )
+      })
+      return [...lines, ...unreadable].join('\n')
+    }
     case 'index': {
       // A delegated run has no report yet. Saying so, and naming the job that will carry it, is the
       // whole answer: the model must not read "started" as "indexed" and query an index that is

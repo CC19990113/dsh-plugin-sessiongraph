@@ -149,7 +149,7 @@ schema 见 `packages/service/src/schema.ts`（`SCHEMA_STATEMENTS`），三方共
 
 ## 4. 查询词汇
 
-`SessiongraphRequest` 判别联合（`packages/service/src/types.ts`），**七个**查询操作：
+`SessiongraphRequest` 判别联合（`packages/service/src/types.ts`），**八个**查询操作：
 
 | operation | 作用 |
 |---|---|
@@ -160,8 +160,17 @@ schema 见 `packages/service/src/schema.ts`（`SCHEMA_STATEMENTS`），三方共
 | `timeline` | 按时间列会话（可过滤 workspace / source），新→旧 |
 | `workspaces` | 工作区清单与统计（会话数、条目数、时间跨度），可按 source 只看一侧 |
 | `status` | 索引自身状态；**唯一**在无索引时也返回结果的操作 |
+| `touched` | 一个会话碰过哪些文件：从该会话的 `tool` 条目现算，不依赖任何新表 |
 
-**`index` 不在这七个里面。** 它是写操作，由工具层直接调 `ctx.sessiongraph.index()`；放进查询
+**`touched` 为什么现算而不建表。** 痕迹图（session → 文件）看着像该物化的东西，但它的全部输入
+已经在 `entry.text` 里：单会话 tool 条目均值 124、最大 1504（822 会话 / 95,890 条实测），
+现算一次是毫秒级 —— 实测 1504 条的会话 3 ms。物化的代价则是 schema v4、全机索引重建、以及 Rust
+内核里第二份解析实现，为一条永远能从 `entry.text` 重算出来的关系。抽取只认结构化参数
+（`read`/`edit`/`write`/`read_image` 的 `file_path`，`grep`/`glob` 的 `path`）：`bash` 占 tool 条目的
+55%，命令行是自由文本，从中抽路径是猜而不是解析，所以整个排除在外；被索引截断到 2KB 的调用进
+`unparsed`，同样不猜。
+
+**`index` 不在这八个里面。** 它是写操作，由工具层直接调 `ctx.sessiongraph.index()`；放进查询
 联合会让「只读 provider」这个约定失效。
 
 ### 排序权重
@@ -181,9 +190,9 @@ top20 会全部变成 `tool/call`，正好和「用户输入优先」相反。Ru
 |---|---|---|
 | `service`（契约） | 契约、schema、tokenizer、seam | — |
 | `sessions`（indexer） | 扫描 + zstd 解压 + JSONL 解析 + 写 `index.db` + `raw.ts` 未删节事件回读 | `packages/sessions/**` |
-| `sqlite`（store） | 读 `index.db`，实现七个查询；`native-query.ts` 做 native/TS 引擎路由 | `packages/sqlite/**` |
+| `sqlite`（store） | 读 `index.db`，实现八个查询；`native-query.ts` 做 native/TS 引擎路由 | `packages/sqlite/**` |
 | `native`（引擎） | 暴露 Rust 内核：`indexSessions`（写）+ `query`（读） | `packages/native/**` |
-| `tool`（consumer） | **一个** `sessiongraph` 工具（八个 operation）+ 系统提示段 + `panel.ts`（HTTP 路由）+ `visibility.ts`（工具可见性） | `packages/tool/**` |
+| `tool`（consumer） | **一个** `sessiongraph` 工具（九个 operation）+ 系统提示段 + `panel.ts`（HTTP 路由）+ `visibility.ts`（工具可见性） | `packages/tool/**` |
 | `panel`（客户端） | 设置页「会话检索」：`lib/host.js` 空 apply + `lib/client.js` CJS factory | `packages/panel/**` |
 | `bundle` | `cordis.patch.yml` | `packages/bundle/**` |
 | `crates/sessiongraph-core` | Rust 内核（napi）：索引写入 + 七个查询 | `crates/**` |
@@ -199,6 +208,11 @@ TS 并只记一次日志 —— 与 sessions 索引器的 native 回退策略同
 `packages/native/tests/query.spec.ts` 保证（逐 operation 与 TS 结果比对）。
 
 实测（700+ 会话真实库，单次 search）：Rust 3.5–4 ms，TypeScript 22 ms。
+
+**`touched` 只有 TypeScript 实现。** 它从 `entry.text` 现算，不读任何索引之外的东西，所以原生内核
+没有必要为它加一张表和一套解析逻辑。`queryNatively` 在拿 kernel **之前**直接把它交给 TS，并且
+**不打印**「原生不可用」—— 那不是配置错误，是这个操作本来就只有一份实现。`nativeRequest` 的
+`switch` 仍补了 `case 'touched'`，因为那个函数没有 default 分支，靠穷举保证不漏操作。
 
 ### 工具可见性（设置页）
 
@@ -227,7 +241,7 @@ TS 并只记一次日志 —— 与 sessions 索引器的 native 回退策略同
 - `sessiongraph`：查询，`timeoutMs` 默认 30s
 - `sessiongraph` (operation `index`)：建/刷新索引，与查询共用 30s 工具预算（大库转 job）
 - 系统提示段（`text` 函数形式）：告诉模型「查本地历史用 sessiongraph，别 grep 会话文件」
-- `agent/pre-step` 提示：用户最后一条亲手输入像历史问题时，每个会话追加一次很短的 `sessiongraph` 使用提示（`historyHint: false` 关闭）
+- `agent/pre-step` 带路：用户最后一条亲手输入像历史问题时，每个会话**先查一次索引**（300 ms 硬超时），把最多三条「日期 · 工作区 · 标题 · 会话 id」注入上下文；查不到、超时、索引坏一律退回原来那句静态提醒，**永不拒绝该步**。记忆类问题（`偏好` / `喜欢` / `习惯` 等）被 `MEMORY_QUESTION_TERMS` 排除，那属于记忆层（`historyHint: false` 关闭）
 - 参数 schema 用 `@deepseek-ai/schemastery`
 
 ## 8. 验收

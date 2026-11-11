@@ -31,14 +31,14 @@ import type {} from 'dsh-plugin-sessiongraph-service'
 import { IndexPool, indexExists } from './database.ts'
 import { DEFAULT_ENGINE, queryNatively } from './native-query.ts'
 import type { SessiongraphStoreEngine } from './native-query.ts'
-import { event, search, session, status, timeline, trace, workspaces } from './queries.ts'
+import { event, search, session, status, timeline, touched, trace, workspaces } from './queries.ts'
 
 export { IndexPool, databasePath, indexExists, openIndex } from './database.ts'
 export { DEFAULT_ENGINE, queryNatively } from './native-query.ts'
 export type { SessiongraphStoreEngine } from './native-query.ts'
 export { toEntry, toHitSubject, toRawEvent, toRawEventSummary, toSessionSummary, toWorkspaceStat } from './rows.ts'
 export type { IndexRow } from './rows.ts'
-export { event, search, session, status, timeline, trace, workspaces } from './queries.ts'
+export { event, search, session, status, timeline, touched, trace, workspaces } from './queries.ts'
 
 /** Cordis plugin name for loader diagnostics. */
 export const name = 'sessiongraph-sqlite'
@@ -184,6 +184,8 @@ async function run<R extends SessiongraphRequest>(
       return timeline(db, request) as SessiongraphResultFor<R>
     case 'workspaces':
       return workspaces(db, request) as SessiongraphResultFor<R>
+    case 'touched':
+      return touched(db, request) as SessiongraphResultFor<R>
     /* v8 ignore next -- exhaustive over the seam's closed operation union; unreachable. */
     default:
       return assertNever(request)

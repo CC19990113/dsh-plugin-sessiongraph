@@ -506,3 +506,86 @@ describe('renderSessiongraph trace', () => {
     expect(text).toContain('sourceEventSeqs）：没有引用其它事件')
   })
 })
+
+describe('renderSessiongraph touched', () => {
+  const touched: SessiongraphValueFor<'touched'> = {
+    operation: 'touched',
+    session_id: '037ad8fc-29b8-4a69-9a02-e75f9cc8fb45',
+    resources: [
+      {
+        path: '/Users/admin/www/adx-admin/src/app.ts',
+        kind: 'file',
+        mentions: 4,
+        first_seq: 2,
+        last_seq: 12,
+        first_at: at(10, 3, 10, 0),
+        last_at: at(10, 3, 11, 0),
+        tools: ['edit', 'read'],
+      },
+      {
+        path: '/Users/admin/www/adx-admin/src',
+        kind: 'dir',
+        mentions: 1,
+        first_seq: 3,
+        last_seq: 3,
+        first_at: at(10, 3, 10, 5),
+        last_at: at(10, 3, 10, 5),
+        tools: ['grep'],
+      },
+    ],
+    total: 2,
+    truncated: false,
+    unparsed: 0,
+  }
+
+  it('renders each resource as an inline path, its kind, the mention count and the tools', () => {
+    const text = renderSessiongraph({}, touched, OPTIONS)
+
+    expect(text).toContain('会话 037ad8fc-29b8-4a69-9a02-e75f9cc8fb45 触及 2 个资源')
+    expect(text).toContain('`/Users/admin/www/adx-admin/src/app.ts` · 文件 · 4 次 · edit, read')
+    expect(text).toContain('`/Users/admin/www/adx-admin/src` · 目录 · 1 次 · grep')
+  })
+
+  it('reports how many calls it could not read instead of hiding them', () => {
+    const partial: SessiongraphValueFor<'touched'> = { ...touched, unparsed: 3 }
+    const text = renderSessiongraph({}, partial, OPTIONS)
+
+    expect(text).toContain('另有 3 条调用参数无法解析')
+  })
+
+  it('says nothing about unreadable calls when every call was read', () => {
+    expect(renderSessiongraph({}, touched, OPTIONS)).not.toContain('无法解析')
+  })
+
+  it('marks a truncated list and points at offset', () => {
+    const truncated: SessiongraphValueFor<'touched'> = { ...touched, total: 9, truncated: true }
+    const text = renderSessiongraph({}, truncated, OPTIONS)
+
+    expect(text).toContain('共 9 个，显示 2 个')
+    expect(text).toContain('用 offset 翻页')
+  })
+
+  it('explains an empty result and names the tools that count', () => {
+    const empty: SessiongraphValueFor<'touched'> = {
+      ...touched,
+      resources: [],
+      total: 0,
+      unparsed: 0,
+    }
+    const text = renderSessiongraph({}, empty, OPTIONS)
+
+    expect(text).toContain('没有记录到读写文件的工具调用')
+    expect(text).toContain('bash')
+  })
+
+  it('keeps the unreadable-call note on an empty result', () => {
+    const empty: SessiongraphValueFor<'touched'> = {
+      ...touched,
+      resources: [],
+      total: 0,
+      unparsed: 2,
+    }
+
+    expect(renderSessiongraph({}, empty, OPTIONS)).toContain('另有 2 条调用参数无法解析')
+  })
+})

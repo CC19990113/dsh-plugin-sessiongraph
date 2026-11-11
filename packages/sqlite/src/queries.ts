@@ -15,6 +15,7 @@
  */
 
 import { statSync } from 'node:fs'
+import { isAbsolute, normalize, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import {
   META_INDEXED_AT,
@@ -39,6 +40,9 @@ import type {
   SessiongraphStatusResult,
   SessiongraphTimelineRequest,
   SessiongraphTimelineResult,
+  SessiongraphTouchedEntry,
+  SessiongraphTouchedRequest,
+  SessiongraphTouchedResult,
   SessiongraphTraceNode,
   SessiongraphTraceRequest,
   SessiongraphTraceResult,
@@ -893,6 +897,176 @@ export function workspaces(
     [...params, limit, bound(request.offset)],
   ).map(toWorkspaceStat)
   return { operation: 'workspaces', workspaces: found, total }
+}
+
+/**
+ * Tools whose arguments name exactly one filesystem path, and the argument field holding it.
+ *
+ * The table is the whole whitelist, and it is matched case-sensitively against the tool name the log
+ * recorded. `read`/`edit`/`write`/`read_image` name a file they were pointed at; `grep`/`glob` name a
+ * tree they were run over. Everything else is ignored — most importantly `bash`, which is the
+ * largest single kind of tool call and whose command line is free text, so reading a path out of it
+ * would be guessing rather than reporting.
+ */
+const TOUCHED_PATH_FIELDS: Readonly<Record<string, { readonly field: string; readonly dir: boolean }>> = {
+  read: { field: 'file_path', dir: false },
+  edit: { field: 'file_path', dir: false },
+  write: { field: 'file_path', dir: false },
+  read_image: { field: 'file_path', dir: false },
+  grep: { field: 'path', dir: true },
+  glob: { field: 'path', dir: true },
+}
+
+/**
+ * What one `tool` entry contributes to a touched answer.
+ *
+ * Three outcomes, not two: a call by a tool that names no path is `ignore` (it is not a parse
+ * failure), while a whitelisted call whose arguments cannot be read is `unparsed` and is counted. A
+ * caller must be able to tell "this session touched two files" from "this session touched two files
+ * out of forty calls this store could not read".
+ */
+type TouchedCall =
+  | { readonly outcome: 'resource'; readonly tool: string; readonly path: string; readonly dir: boolean }
+  | { readonly outcome: 'ignore' }
+  | { readonly outcome: 'unparsed' }
+
+/**
+ * Read the one filesystem path a tool entry names.
+ *
+ * `entry.text` is `<tool name> <json arguments>`; the tool name never contains a space, so the first
+ * space is the boundary. An entry with no space at all is a call with no arguments and contributes
+ * nothing. A clipped entry is `unparsed` without even attempting the parse: the indexer cut the JSON
+ * at its per-entry cap, and a truncated JSON is never guessed at.
+ * @param entry - one validated `tool` entry from the session.
+ * @param workspace - the session's recorded cwd, the anchor for a relative path.
+ * @returns the normalised path and how to classify it, or why the call contributed nothing.
+ */
+function touchedCall(entry: SessiongraphEntry, workspace: string): TouchedCall {
+  const space = entry.text.indexOf(' ')
+  if (space <= 0) return { outcome: 'ignore' }
+  const tool = entry.text.slice(0, space)
+  const spec = TOUCHED_PATH_FIELDS[tool]
+  if (spec === undefined) return { outcome: 'ignore' }
+  if (entry.clipped) return { outcome: 'unparsed' }
+  let args: unknown
+  try {
+    args = JSON.parse(entry.text.slice(space + 1))
+  } catch {
+    return { outcome: 'unparsed' }
+  }
+  if (typeof args !== 'object' || args === null) return { outcome: 'unparsed' }
+  const named = (args as Record<string, unknown>)[spec.field]
+  if (typeof named !== 'string' || named.trim() === '') return { outcome: 'unparsed' }
+  // An absolute path is normalised as given; a relative one is anchored to the session's own cwd. The
+  // filesystem is never consulted and symlinks are never resolved: the file may be long gone, and the
+  // question is what the call named, not what it would point at today.
+  let path: string
+  if (isAbsolute(named)) path = normalize(named)
+  else if (workspace.trim() === '') return { outcome: 'unparsed' }
+  else path = resolve(workspace, named)
+  // A trailing separator must not split one directory into two resources: `normalize` keeps it while
+  // `resolve` drops it, so the same tree named by an absolute and by a relative path would otherwise
+  // land in two rows. The filesystem root keeps its single slash. Whether it is a directory is
+  // decided separately, from what the call itself wrote.
+  if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1)
+  // A grep/glob target is a tree by construction; anything else is a directory only when the call
+  // wrote it with a trailing separator.
+  return { outcome: 'resource', tool, path, dir: spec.dir || named.endsWith('/') }
+}
+
+/** One resource's running totals while a session's tool entries are walked. */
+interface TouchedTotals {
+  dir: boolean
+  mentions: number
+  firstSeq: number
+  lastSeq: number
+  firstAt: number
+  lastAt: number
+  tools: Set<string>
+}
+
+/**
+ * List the filesystem resources one session's tool calls referenced.
+ *
+ * Answered from the index's own `tool` entries rather than an edge table: a session holds around a
+ * hundred tool calls, so a full walk costs milliseconds, while a materialised table would cost a
+ * schema version, a rebuild of every index on the machine, and a second implementation in the native
+ * kernel — for a relationship that can always be recomputed from `entry.text`.
+ * @param db - the open index connection.
+ * @param request - the touched query.
+ * @returns the page of resources, the pre-paging total, and how many calls could not be read.
+ */
+export function touched(db: DatabaseSync, request: SessiongraphTouchedRequest): SessiongraphTouchedResult {
+  const id = resolveSessionId(db, request.sessionId)
+  // The session's workspace is the anchor every relative path is resolved against, so a corrupt row
+  // must fail here rather than silently resolve against an empty directory.
+  const workspace = toSessionSummary(sessionSummaryRow(db, id)).workspace
+  const toolEntries = rows(
+    db,
+    `SELECT ${ENTRY_COLUMNS} FROM entry WHERE session_id = ? AND kind = 'tool' ORDER BY seq ASC`,
+    [id],
+  ).map(toEntry)
+  const totals = new Map<string, TouchedTotals>()
+  let unparsed = 0
+  for (const entry of toolEntries) {
+    const call = touchedCall(entry, workspace)
+    if (call.outcome === 'ignore') continue
+    if (call.outcome === 'unparsed') {
+      unparsed += 1
+      continue
+    }
+    const running = totals.get(call.path)
+    if (running === undefined) {
+      totals.set(call.path, {
+        dir: call.dir,
+        mentions: 1,
+        firstSeq: entry.seq,
+        lastSeq: entry.seq,
+        firstAt: entry.time,
+        lastAt: entry.time,
+        tools: new Set([call.tool]),
+      })
+      continue
+    }
+    // One path reached through several calls is one resource: the counts and the span accumulate, and
+    // a single call that named it as a tree is enough to report it as one.
+    running.dir = running.dir || call.dir
+    running.mentions += 1
+    running.firstSeq = Math.min(running.firstSeq, entry.seq)
+    running.lastSeq = Math.max(running.lastSeq, entry.seq)
+    running.firstAt = Math.min(running.firstAt, entry.time)
+    running.lastAt = Math.max(running.lastAt, entry.time)
+    running.tools.add(call.tool)
+  }
+  const merged: SessiongraphTouchedEntry[] = [...totals.entries()]
+    .map(([path, running]): SessiongraphTouchedEntry => ({
+      path,
+      kind: running.dir ? 'dir' : 'file',
+      mentions: running.mentions,
+      firstSeq: running.firstSeq,
+      lastSeq: running.lastSeq,
+      firstAt: running.firstAt,
+      lastAt: running.lastAt,
+      tools: [...running.tools].sort(),
+    }))
+    // Most-referenced first, then most recently touched, then path. The third key makes the order
+    // total, so paging cannot repeat or skip a resource whose first two keys tie.
+    .sort(
+      (a, b) =>
+        b.mentions - a.mentions
+        || b.lastAt - a.lastAt
+        || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+    )
+  const limit = bound(request.limit)
+  const offset = bound(request.offset)
+  return {
+    operation: 'touched',
+    sessionId: id,
+    resources: merged.slice(offset, offset + limit),
+    total: merged.length,
+    truncated: merged.length > limit + offset,
+    unparsed,
+  }
 }
 
 /**
