@@ -128,12 +128,27 @@ jobs:
       # Publishing an artifact that does not typecheck or pass its own tests is
       # not recoverable: npm forbids re-using a version number.
       - name: Typecheck
+        env:
+          # The lockfile this checkout carries predates the platform packages
+          # published moments ago by this very run; pnpm's implicit dependency
+          # check would refuse with ERR_PNPM_OUTDATED_LOCKFILE.
+          npm_config_verify_deps_before_run: 'false'
         run: pnpm run typecheck
 
       - name: Test
+        env:
+          # The lockfile this checkout carries predates the platform packages
+          # published moments ago by this very run; pnpm's implicit dependency
+          # check would refuse with ERR_PNPM_OUTDATED_LOCKFILE.
+          npm_config_verify_deps_before_run: 'false'
         run: pnpm test
 
       - name: Build
+        env:
+          # The lockfile this checkout carries predates the platform packages
+          # published moments ago by this very run; pnpm's implicit dependency
+          # check would refuse with ERR_PNPM_OUTDATED_LOCKFILE.
+          npm_config_verify_deps_before_run: 'false'
         run: pnpm run build
 
       # The bundle is what users install, so its npm page must render the
